@@ -1,0 +1,4 @@
+- DO NOT run any terminal commands automatically.
+- DO NOT open or check localhost/browser to verify UI changes.
+- DO NOT perform background type-checking.
+- Just apply the code to the file and stop execution immediately.

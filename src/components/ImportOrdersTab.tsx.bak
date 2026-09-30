@@ -1,0 +1,3065 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable react-hooks/refs */
+/* eslint-disable react-hooks/set-state-in-effect */
+/* eslint-disable react-hooks/exhaustive-deps */
+import React, { useState, useMemo, useEffect, useRef } from "react";
+import * as XLSX from "xlsx";
+import { 
+  Upload, 
+  AlertTriangle, 
+  Check, 
+  Search, 
+  ChevronDown,
+  Download,
+  Trash2,
+  FileSpreadsheet
+} from "lucide-react";
+import type { Product, Order, UploadedDataset } from "../types";
+import { parseAndNormalizeDate } from "../utils";
+
+interface ParsedImportProduct {
+  name: string;
+  category: Product["category"];
+  brand: string;
+  price: number;
+  stock: number;
+  warnings: string | null;
+}
+
+interface ImportOrdersTabProps {
+  isDarkMode: boolean;
+  products: Product[];
+  onSubmit: (orders: Order[], updateInventory: boolean) => void;
+  onImportProducts?: (products: { name: string; category: Product["category"]; brand: string; price: number; stock: number; }[]) => void;
+  onImportDatasets?: (datasets: UploadedDataset[]) => void;
+  productFiles?: UploadedDataset[];
+  onImportProductFiles?: (datasets: UploadedDataset[]) => void;
+  triggerAlert: (msg: string, type?: "success" | "warning" | "info" | "error") => void;
+  setActiveTab: (tab: "dashboard" | "sales" | "calculator" | "import-orders" | "users") => void;
+  pendingImportFile?: UploadedDataset | null;
+  onClearPendingImportFile?: () => void;
+}
+
+interface UploadedFileData {
+  fileName: string;
+  rows: unknown[][];
+  headers: string[];
+  headerRowIndex: number;
+  sheetNames?: string[];
+  activeSheetName?: string;
+  allSheetsData?: Record<string, { rows: unknown[][]; headers: string[]; headerRowIndex: number }>;
+  platform: "lazada" | "shopee" | "tiktok" | "facebook" | "line" | "unknown";
+  id?: string;
+}
+
+interface ColumnDef {
+  key: string;
+  label: string;
+  autogen: boolean;
+  isId: boolean;
+  isMoney: boolean;
+  visible: boolean;
+  isNum: boolean;
+}
+
+interface Dataset {
+  id: string;
+  platform: "lazada" | "shopee" | "tiktok" | "facebook" | "line" | "unknown";
+  kind: "income" | "order" | "report" | "withdraw" | "glossary" | "data";
+  fileName: string;
+  sheetName: string;
+  columns: ColumnDef[];
+  rows: Record<string, any>[];
+  kvMode: boolean;
+  search: string;
+  sort: { key: string | null; dir: 1 | -1 };
+  page: number;
+  pageSize: number;
+}
+
+const generateUniqueId = (prefix: string = "ds") => {
+  return `${prefix}_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+};
+
+const getCurrentFormattedDate = () => {
+  return new Date().toLocaleString("th-TH");
+};
+
+const KEY_MAPS = {
+  orderId: [
+    "order id", "รหัสคำสั่งซื้อ", "หมายเลขคำสั่งซื้อ", "เลขที่คำสั่งซื้อ", "เลขคำสั่งซื้อ", 
+    "order no", "order number", "order_id", "id", "หมายเลขคำสั่งซื้อ/หมายเลขพัสดุ", 
+    "หมายเลขคำสั่งซื้อ / หมายเลขพัสดุ", "ordernumber"
+  ],
+  customerName: [
+    "customer", "recipient", "buyer", "ชื่อลูกค้า", "ชื่อผู้รับ", "ผู้ซื้อ", 
+    "ชื่อผู้ใช้ (ผู้ซื้อ)", "ชื่อผู้ใช้(ผู้ซื้อ)", "customer name", "recipient name", 
+    "buyer name", "customer_name", "shippingname", "shipping name", "buyer username"
+  ],
+  productName: [
+    "product name", "item name", "product_name", "itemname",
+    "ชื่อสินค้า", "รายละเอียดสินค้า", "ข้อมูลสินค้า", 
+    "ชื่อรายละเอียดสินค้า", "ชื่อสินค้า/SKU", "ชื่อสินค้า/รายละเอียดสินค้า", 
+    "product", "item", "สินค้า"
+  ],
+  quantity: [
+    "quantity", "qty", "amount", "จำนวน", "จำนวนสินค้า", "จำนวนชิ้น", "จำนวนสินค้าที่ซื้อ", 
+    "จำนวนสินค้าที่ซื้อในคำสั่งซื้อ", "qty sold", "quantity_sold"
+  ],
+  total: [
+    "total", "price", "amount paid", "revenue", "ยอดคำสั่งซื้อ", "ราคารวม", "ราคาสุทธิ", 
+    "ยอดขาย", "ยอดขายรวม", "total payment", "total_price", "grand total", "ยอดเงินโอน", "เงินที่โอน", 
+    "จำนวนเงินที่โอน", "รายรับรวม", "ราคาขายสุทธิ", "ราคาขาย", "ราคาลดแล้ว", 
+    "ราคาสินค้าทั้งหมดที่ต้องชำระ", "ยอดรวมของคำสั่งซื้อ", "ยอดรวมสุทธิ", 
+    "ยอดชำระเงินทั้งหมด", "รายได้สุทธิ", "ยอดเงิน", "จำนวนเงิน", "ยอดชำระ", 
+    "ยอดชำระเงิน", "จำนวนเงินรวม", "unitprice", "paidprice", "paid price", "unit price",
+    "order amount", "order_amount", "sku subtotal after discount",
+    "จำนวนเงินทั้งหมด", "สินค้าราคาปกติ", "ราคาสินค้าที่ชำระโดยผู้ซื้อ (thb)"
+  ],
+  date: [
+    "date", "time", "created", "วันที่", "เวลา", "order date", "created date", 
+    "created_time", "order_time", "วันที่โอนเงินสำเร็จ", "วันที่โอนเงิน", 
+    "เวลาการโอนเงินสำเร็จ", "วันที่โอน", "เวลาสั่งซื้อ", "เวลาที่ทำการสั่งซื้อ", 
+    "วันที่สั่งซื้อ", "เวลาชำระเงิน", "createtime", "create time", "created time", 
+    "created_time", "paid time", "paid_time",
+    "วันที่ทำการสั่งซื้อ", "เวลาที่ทำการสั่งซื้อสำเร็จ", "วันที่โอนชำระเงินสำเร็จ"
+  ],
+  shippingFee: [
+    "shipping fee", "shipping", "ค่าจัดส่ง", "ค่าส่ง", "ค่าจัดส่งที่ชำระโดยผู้ซื้อ", 
+    "ค่าขนส่งที่ชำระโดยผู้ซื้อ", "shipping_fee", "ค่าขนส่ง", "shipping cost", 
+    "shippingfee", "shipping fee after discount", "original shipping fee"
+  ],
+  platformFee: [
+    "platform fee", "fee", "ค่าบริการ", "ค่าธรรมเนียม", "ค่าธรรมเนียมการบริการ", 
+    "ค่าธรรมเนียมการทำธุรกรรม", "ค่าคอมมิชชัน", "ค่าคอมมิชชั่น", "commission", "service fee", 
+    "platform_fee", "ค่าธรรมเนียมธุรกรรม", "ค่าบริการขาย", 
+    "ค่าธรรมเนียมการทำธุรกรรม (ธุรกรรม)", "ค่าธรรมเนียมการทำธุรกรรม(ธุรกรรม)",
+    "transaction fee", "transactionfee", "ค่าธรรมเนียมทั้งหมด", "ค่าธรรมเนียมคำสั่งซื้อ"
+  ],
+  netIncome: [
+    "net income", "net", "payout", "รายรับสุทธิ", "ยอดโอน", "จำนวนเงินที่โอน", 
+    "เงินโอน", "net_income", "net_amount", "ยอดเงินโอน", "รายได้สุทธิ", "รายรับ", 
+    "ยอดชำระสุทธิ", "ยอดโอนเงินสุทธิ", "ยอดโอนสุทธิ", "จำนวนเงินทั้งหมด",
+    "จำนวนเงินทั้งหมดที่โอนแล้ว (฿)", "ยอดชำระเงินทั้งหมด", "จำนวนเงินที่ชำระทั้งหมด",
+    "การชำระเงินของลูกค้า", "ยอดเงินโอนสุทธิ"
+  ]
+};
+
+const KEY_MAPS_PRODUCT = {
+  name: ["product name", "ชื่อสินค้า", "ชื่อรายละเอียดสินค้า", "สินค้า", "name", "product_name"],
+  category: ["category", "หมวดหมู่หลัก", "หมวดหมู่", "กลุ่มสินค้า", "product_category"],
+  brand: ["brand", "แบรนด์สินค้า", "แบรนด์", "ยี่ห้อ", "product_brand"],
+  price: ["price", "ราคา", "ราคาจำหน่าย", "ราคาขาย", "unit price", "price_per_unit"],
+  stock: ["stock", "จำนวนสินค้าคงเหลือ", "คงเหลือ", "จำนวน", "จำนวนสต็อก", "สต็อก", "stock_qty", "qty"]
+};
+
+const PLATFORMS = {
+  lazada: { label: "Lazada", color: "#2E2BB8" },
+  shopee: { label: "Shopee", color: "#EE4D2D" },
+  tiktok: { label: "TikTok Shop", color: "#FE2C55" },
+  facebook: { label: "Facebook", color: "#1877F2" },
+  line: { label: "LINE OA", color: "#06C755" },
+  unknown: { label: "ไฟล์ทั่วไป", color: "#7A8699" },
+};
+
+const UPLOAD_THEMES = {
+  all: {
+    activeBorder: "border-blue-500 ring-4 ring-blue-500/10 shadow-[0_0_25px_rgba(59,130,246,0.25)]",
+    normalBorder: "border-apple-primary/15 hover:border-blue-500/40 bg-apple-secondary hover:shadow-[0_8px_30px_rgba(59,130,246,0.05)]",
+    iconBg: "bg-gradient-to-br from-blue-500/15 to-indigo-500/15 text-blue-500 shadow-sm shadow-blue-500/10",
+    buttonClass: "bg-blue-500 hover:bg-blue-600 text-white shadow-md shadow-blue-500/10 hover:shadow-blue-500/20",
+    title: "ลากและวางไฟล์รายงานร้านค้าที่นี่",
+    desc: "รองรับรายงาน Lazada, Shopee, TikTok Shop, Facebook และ LINE OA ทั้งไฟล์ออเดอร์และรายรับบัญชี ระบบจะตรวจแยกประเภทและแพลตฟอร์มให้คุณอัตโนมัติ"
+  },
+  lazada: {
+    activeBorder: "border-[#2E2BB8] ring-4 ring-[#2E2BB8]/10 shadow-[0_0_25px_rgba(46,43,184,0.25)]",
+    normalBorder: "border-[#2E2BB8]/15 hover:border-[#2E2BB8]/40 bg-apple-secondary hover:shadow-[0_8px_30px_rgba(46,43,184,0.05)]",
+    iconBg: "bg-gradient-to-br from-[#2E2BB8]/15 to-indigo-500/15 text-[#2E2BB8] shadow-sm shadow-[#2E2BB8]/10",
+    buttonClass: "bg-[#2E2BB8] hover:bg-[#1E1B98] text-white shadow-md shadow-[#2E2BB8]/10 hover:shadow-[#2E2BB8]/20",
+    title: "อัปโหลดไฟล์รายงาน Lazada",
+    desc: "รองรับไฟล์รายรับ (Income Overview) และคำสั่งซื้อ (Orders) ของ Lazada ระบบจะบังคับใช้เป็นแพลตฟอร์ม Lazada"
+  },
+  shopee: {
+    activeBorder: "border-[#EE4D2D] ring-4 ring-[#EE4D2D]/10 shadow-[0_0_25px_rgba(238,77,45,0.25)]",
+    normalBorder: "border-[#EE4D2D]/15 hover:border-[#EE4D2D]/40 bg-apple-secondary hover:shadow-[0_8px_30px_rgba(238,77,45,0.05)]",
+    iconBg: "bg-gradient-to-br from-[#EE4D2D]/15 to-[#FE6D4D]/15 text-[#EE4D2D] shadow-sm shadow-[#EE4D2D]/10",
+    buttonClass: "bg-[#EE4D2D] hover:bg-[#DE3D1D] text-white shadow-md shadow-[#EE4D2D]/10 hover:shadow-[#EE4D2D]/20",
+    title: "อัปโหลดไฟล์รายงาน Shopee",
+    desc: "รองรับไฟล์รายรับ (โอนเงินสำเร็จ) และคำสั่งซื้อ (Orders) ของ Shopee ระบบจะบังคับใช้เป็นแพลตฟอร์ม Shopee"
+  },
+  tiktok: {
+    activeBorder: "border-[#FE2C55] ring-4 ring-[#FE2C55]/10 shadow-[0_0_25px_rgba(254,44,85,0.25)]",
+    normalBorder: "border-[#FE2C55]/15 hover:border-[#FE2C55]/40 bg-apple-secondary hover:shadow-[0_8px_30px_rgba(254,44,85,0.05)]",
+    iconBg: "bg-gradient-to-br from-[#FE2C55]/15 to-[#FF4C75]/15 text-[#FE2C55] shadow-sm shadow-[#FE2C55]/10",
+    buttonClass: "bg-[#FE2C55] hover:bg-[#EE1C45] text-white shadow-md shadow-[#FE2C55]/10 hover:shadow-[#FE2C55]/20",
+    title: "อัปโหลดไฟล์รายงาน TikTok Shop",
+    desc: "รองรับไฟล์รายรับ (รายละเอียดคำสั่งซื้อ) และคำสั่งซื้อ (Order SKU) ของ TikTok Shop ระบบจะบังคับใช้เป็นแพลตฟอร์ม TikTok Shop"
+  },
+  facebook: {
+    activeBorder: "border-[#1877F2] ring-4 ring-[#1877F2]/10 shadow-[0_0_25px_rgba(24,119,242,0.25)]",
+    normalBorder: "border-[#1877F2]/15 hover:border-[#1877F2]/40 bg-apple-secondary hover:shadow-[0_8px_30px_rgba(24,119,242,0.05)]",
+    iconBg: "bg-gradient-to-br from-[#1877F2]/15 to-[#1877F2]/30 text-[#1877F2] shadow-sm shadow-[#1877F2]/10",
+    buttonClass: "bg-[#1877F2] hover:bg-[#166FE5] text-white shadow-md shadow-[#1877F2]/10 hover:shadow-[#1877F2]/20",
+    title: "อัปโหลดไฟล์รายงาน Facebook",
+    desc: "รองรับรายงานยอดขายจาก Facebook Chat / Page365 / เทมเพลตมาตรฐาน ระบบจะบันทึกเป็นช่องทาง Facebook"
+  },
+  line: {
+    activeBorder: "border-[#06C755] ring-4 ring-[#06C755]/10 shadow-[0_0_25px_rgba(6,199,85,0.25)]",
+    normalBorder: "border-[#06C755]/15 hover:border-[#06C755]/40 bg-apple-secondary hover:shadow-[0_8px_30px_rgba(6,199,85,0.05)]",
+    iconBg: "bg-gradient-to-br from-[#06C755]/15 to-[#06C755]/30 text-[#06C755] shadow-sm shadow-[#06C755]/10",
+    buttonClass: "bg-[#06C755] hover:bg-[#05B64E] text-white shadow-md shadow-[#06C755]/10 hover:shadow-[#06C755]/20",
+    title: "อัปโหลดไฟล์รายงาน LINE OA",
+    desc: "รองรับรายงานยอดขายจาก LINE Shopping / LINE OA / เทมเพลตมาตรฐาน ระบบจะบันทึกเป็นช่องทาง LINE OA"
+  }
+};
+
+const TYPE_LABEL = {
+  income: "รายรับ",
+  order: "คำสั่งซื้อ",
+  report: "รายงาน",
+  withdraw: "การถอนเงิน",
+  glossary: "คำอธิบาย",
+  data: "ข้อมูล"
+};
+
+const detectPlatform = (name: string): "lazada" | "shopee" | "tiktok" | "facebook" | "line" | "unknown" => {
+  const n = name.toLowerCase();
+  if (n.includes("lazada")) return "lazada";
+  if (n.includes("shopee")) return "shopee";
+  if (n.includes("tiktok") || n.includes("tik_tok") || n.includes("tt_")) return "tiktok";
+  if (n.includes("facebook") || n.includes("page365") || n.includes("fb_") || n.includes("fb-") || n.includes("fb ")) return "facebook";
+  if (n.includes("line") || n.includes("line_") || n.includes("line-") || n.includes("lineoa")) return "line";
+  return "unknown";
+};
+
+const detectPlatformFromHeaders = (headers: string[]): "lazada" | "shopee" | "tiktok" | "facebook" | "line" | "unknown" => {
+  const lcHeaders = headers.map(h => String(h).trim().toLowerCase());
+  if (lcHeaders.some(h => ["facebook id", "fb name", "fb_id", "ชื่อลูกค้า fb", "เพจ", "page name", "facebook_order", "fb_order"].includes(h))) {
+    return "facebook";
+  }
+  if (lcHeaders.some(h => ["line id", "line name", "line_id", "ชื่อลูกค้า line", "ไลน์", "line_order", "lineoa_order"].includes(h))) {
+    return "line";
+  }
+  if (lcHeaders.some(h => ["วันที่สั่งซื้อ (yyyy-mm-dd)", "สถานะ (paid/pending/refunded)", "ยอดขายรวม"].includes(h))) {
+    return "facebook";
+  }
+  if (lcHeaders.some(h => ["orderitemid", "orderitemno", "sellerisku", "paidprice", "unitprice", "shippingaddress", "lazada sku", "รหัสรอบบิล", "ระยะเวลาใบแจ้งยอด", "สถานะการโอนเงิน"].includes(h))) {
+    return "lazada";
+  }
+  if (lcHeaders.some(h => ["ค่าจัดส่งที่ shopee ชำระโดยชื่อของคุณ", "ค่าธรรมเนียมโครงสร้างพื้นฐานแพลตฟอร์ม", "จำนวนเงินทั้งหมดที่โอนแล้ว (฿)", "เลขอ้างอิง parent sku", "เลขอ้างอิง sku (sku reference no.)", "โค้ด coins cashback ชำระโดยผู้ขาย", "หมายเลขคำสั่งซื้อ", "ราคาขาย", "จำนวนเงินทั้งหมด", "ค่าคอมมิชชั่น", "สถานะการสั่งซื้อ", "ราคาขายสุทธิ", "ส่วนลดจาก shopee", "ราคาสินค้าที่ชำระโดยผู้ซื้อ (thb)"].includes(h))) {
+    return "shopee";
+  }
+  if (lcHeaders.some(h => ["order id", "order status", "seller sku", "product name", "sku subtotal after discount", "ยอดรวมค่าสินค้าหลังหักส่วนลดจากผู้ขาย", "ค่าคอมมิชชั่น tiktok shop", "หมายเลขคำสั่งซื้อ/การปรับ", "เวลาที่ชำระคำสั่งซื้อ"].includes(h))) {
+    return "tiktok";
+  }
+  return "unknown";
+};
+
+const determinePlatform = (fileName: string, headers: string[]): "lazada" | "shopee" | "tiktok" | "facebook" | "line" | "unknown" => {
+  const namePlatform = detectPlatform(fileName);
+  if (namePlatform !== "unknown") return namePlatform;
+  return detectPlatformFromHeaders(headers);
+};
+
+const detectKind = (name: string, sheetName: string): Dataset["kind"] => {
+  const n = (name + " " + sheetName).toLowerCase();
+  if (n.includes("income") || n.includes("โอนเง") || n.includes("รายรับ") || n.includes("รายได้") || sheetName.includes("รายละเอียดคำสั่งซื้อ")) return "income";
+  if (n.includes("order") || n.includes("คำสั่งซื้อ") || sheetName.toLowerCase().includes("ordersku")) return "order";
+  return "data";
+};
+
+const sheetKind = (sheetName: string): Dataset["kind"] | null => {
+  const s = sheetName.toLowerCase();
+  if (s.includes("summary") || sheetName.includes("รายงาน")) return "report";
+  if (sheetName.includes("ถอน") || s.includes("withdraw")) return "withdraw";
+  if (sheetName.includes("คำอธิบาย") || s.includes("glossary")) return "glossary";
+  return null;
+};
+
+const ID_HINTS = ["sku", "code", "หมายเลข", "เลขอ้างอิง", "อ้างอิง", "tracking", "ติดตาม",
+                  "โทร", "phone", "zip", "ไปรษณีย์", "รหัส", "barcode", "package", "taxcode"];
+
+const isIdHeader = (h: string): boolean => {
+  const s = String(h).toLowerCase();
+  if (/(^|[^a-z])id([^a-z]|$)/.test(s) || /[a-z]id$/.test(s)) return true;
+  return ID_HINTS.some(k => s.includes(k));
+};
+
+const MONEY_HINTS = ["เงิน", "ราคา", "ค่า", "ส่วนลด", "ยอด", "ภาษี", "vat", "wht", "คอมมิช", "commission",
+                     "fee", "price", "amount", "discount", "total", "refund", "tax", "payout", "โอน",
+                     "รายได้", "รายรับ", "คืน"];
+
+const isMoneyHeader = (h: string): boolean => {
+  const s = String(h).toLowerCase();
+  return MONEY_HINTS.some(k => s.includes(k));
+};
+
+const detectHeaderRow = (aoa: any[][]): { idx: number; width: number } => {
+  if (aoa.length > 0 && aoa[0] && aoa[0].length >= 10) {
+    const col0 = aoa[0][0];
+    const col1 = aoa[0][1];
+    const col2 = aoa[0][2];
+    const col4 = aoa[0][4];
+
+    const isSeqNum = typeof col0 === "number" || (col0 !== null && col0 !== undefined && /^\d+$/.test(String(col0).trim()));
+    const isOrderId = col1 && typeof col1 === "string" && /^(IV|HS|order-)\d+/i.test(col1.trim());
+    const isDate = col2 && typeof col2 === "string" && (col2.includes("/") || col2.includes("-"));
+    const isOnlineSystem = col4 && typeof col4 === "string" && col4.trim().includes("ระบบขายออนไลน์รวม");
+
+    if (isSeqNum && isOrderId && isDate && isOnlineSystem) {
+      return { idx: -1, width: aoa[0].length };
+    }
+  }
+
+  const limit = Math.min(15, aoa.length);
+  let best = -1, bestCount = 1;
+  for (let i = 0; i < limit; i++) {
+    const c = (aoa[i] || []).filter(x => x !== null && x !== undefined && String(x).trim() !== "").length;
+    if (c > bestCount) {
+      bestCount = c;
+      best = i;
+    }
+  }
+  return { idx: best < 0 ? 0 : best, width: bestCount };
+};
+
+const nf0 = new Intl.NumberFormat("th-TH", { maximumFractionDigits: 0 });
+const nf2 = new Intl.NumberFormat("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const fmtCell = (val: any, col: ColumnDef): { text: string; cls: string } => {
+  if (val === null || val === undefined || val === "") return { text: "—", cls: "text-neutral-400 dark:text-neutral-600" };
+  
+  if (val instanceof Date) {
+    const d = val;
+    const dateStr = d.toLocaleString("th-TH", { year: "numeric", month: "short", day: "numeric" });
+    const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0;
+    const timeStr = hasTime ? " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") : "";
+    return { text: dateStr + timeStr, cls: "" };
+  }
+  
+  if (typeof val === "number") {
+    let cls = "text-right font-mono";
+    if (val < 0) cls += " text-red-500 font-bold";
+    
+    const isBigInt = Math.abs(val) >= 1e9 && Number.isInteger(val);
+    if (isBigInt || col.isId) {
+      return { text: String(val), cls: "font-mono" };
+    }
+    
+    const formatted = Number.isInteger(val) && !col.isMoney ? nf0.format(val) : nf2.format(val);
+    if (val > 0 && col.isMoney) cls += " text-emerald-600 dark:text-emerald-500 font-bold";
+    return { text: formatted, cls };
+  }
+  
+  return { text: String(val), cls: "" };
+};
+
+const findColIndex = (headers: string[], targetKeywords: string[]): number => {
+  const idx = headers.findIndex((h) => {
+    const cleanHeader = h.trim().toLowerCase();
+    return targetKeywords.some((keyword) => cleanHeader === keyword.toLowerCase());
+  });
+  if (idx !== -1) return idx;
+
+  return headers.findIndex((h) => {
+    const cleanHeader = h.trim().toLowerCase();
+    return targetKeywords.some((keyword) => {
+      const cleanKeyword = keyword.toLowerCase();
+      if (
+        cleanKeyword === "สินค้า" || 
+        cleanKeyword === "ส่ง" || 
+        cleanKeyword === "fee" || 
+        cleanKeyword === "id" ||
+        cleanKeyword === "จำนวน" || 
+        cleanKeyword === "amount" || 
+        cleanKeyword === "เวลา" || 
+        cleanKeyword === "date"
+      ) {
+        return false;
+      }
+      return cleanHeader.includes(cleanKeyword);
+    });
+  });
+};
+
+const parseCSV = (text: string): string[][] => {
+  const lines = text.split(/\r?\n/);
+  return lines
+    .map((line) => {
+      const result: string[] = [];
+      let current = "";
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === "," && !inQuotes) {
+          result.push(current);
+          current = "";
+        } else {
+          current += char;
+        }
+      }
+      result.push(current);
+      return result;
+    })
+    .filter((row) => row.length > 0 && row.some((cell) => cell.trim() !== ""));
+};
+
+const parseFileRows = (rows: unknown[][]) => {
+  if (rows.length < 1) return { headers: [], rows: [], headerRowIndex: 0 };
+
+  // Check headerless condition
+  const { idx: headerIdx, width } = detectHeaderRow(rows);
+  if (headerIdx === -1) {
+    const generatedHeaders = Array.from({ length: width }, (_, i) => `คอลัมน์ ${i + 1}`);
+    return {
+      headers: generatedHeaders,
+      rows,
+      headerRowIndex: -1
+    };
+  }
+
+  let headerRowIndex = 0;
+  let maxScore = -1;
+  
+  for (let i = 0; i < Math.min(rows.length, 15); i++) {
+    const row = rows[i];
+    if (!row || !Array.isArray(row)) continue;
+    const rowStrings = row.map(cell => String(cell || "").trim());
+    const nonEmptyCount = rowStrings.filter(cell => cell !== "").length;
+    
+    let keywordMatches = 0;
+    if (findColIndex(rowStrings, KEY_MAPS.orderId) !== -1) keywordMatches++;
+    if (findColIndex(rowStrings, KEY_MAPS.productName) !== -1) keywordMatches++;
+    if (findColIndex(rowStrings, KEY_MAPS.total) !== -1) keywordMatches++;
+    
+    const score = (keywordMatches * 100) + nonEmptyCount;
+    
+    if (score > maxScore) {
+      maxScore = score;
+      headerRowIndex = i;
+    }
+  }
+
+  const headers = (rows[headerRowIndex] || []).map(h => String(h || "").trim());
+  const dataRows = rows.slice(headerRowIndex + 1).filter(r => r.some(c => c !== null && String(c).trim() !== ""));
+
+  return {
+    headers,
+    rows: dataRows,
+    headerRowIndex
+  };
+};
+
+const buildDataset = (
+  wb: XLSX.WorkBook,
+  sheetName: string,
+  fileName: string,
+  platform: Dataset["platform"],
+  kind: Dataset["kind"],
+  currentDatasetsCount: number
+): Dataset | null => {
+  const ws = wb.Sheets[sheetName];
+  if (!ws) return null;
+  const rawAoa = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1, raw: true, defval: null, blankrows: false });
+  if (!rawAoa.length) return null;
+  
+  const cols = ws['!cols'];
+  const aoa = rawAoa.map(row => {
+    if (!Array.isArray(row)) return row;
+    return row.filter((_, c) => !(cols && cols[c] && cols[c].hidden));
+  });
+  
+  const { idx } = detectHeaderRow(aoa);
+  
+  const headerRow: any[] = idx >= 0 ? (aoa[idx] || []) : [];
+  const dataRows: any[][] = idx >= 0
+    ? aoa.slice(idx + 1).filter(r => r.some(c => c !== null && String(c).trim() !== ""))
+    : aoa.filter(r => r.some(c => c !== null && String(c).trim() !== ""));
+  const kvMode = false;
+  
+  const maxCols = Math.max(headerRow.length, ...dataRows.map(r => r.length), 1);
+  let columns: ColumnDef[] = [];
+  for (let c = 0; c < maxCols; c++) {
+    const raw = idx >= 0 ? headerRow[c] : undefined;
+    let auto = false;
+    let lbl: string;
+    if (raw === null || raw === undefined || String(raw).trim() === "" || /^Unnamed/i.test(String(raw))) {
+      lbl = "คอลัมน์ " + (c + 1);
+      auto = true;
+    } else {
+      lbl = String(raw).trim();
+    }
+    columns.push({
+      key: "c" + c,
+      label: lbl,
+      autogen: auto,
+      isId: isIdHeader(lbl),
+      isMoney: isMoneyHeader(lbl),
+      visible: true,
+      isNum: false
+    });
+  }
+  
+  const parsedRows = dataRows.map(r => {
+    const o: Record<string, any> = {};
+    columns.forEach((col, c) => {
+      const v = r[c] === undefined ? null : r[c];
+      let parsedVal: any = v;
+      if (!col.isId && typeof v === "string") {
+        const s = v.trim();
+        if (s !== "") {
+          const cl = s.replace(/,/g, "");
+          if (/^-?\d+(\.\d+)?$/.test(cl)) parsedVal = Number(cl);
+        }
+      }
+      o[col.key] = parsedVal;
+    });
+    return o;
+  });
+  
+  if (parsedRows.length >= 3) {
+    let mismatch = 0;
+    columns.forEach(col => {
+      let num = 0, tot = 0;
+      for (let i = 1; i < parsedRows.length; i++) {
+        const v = parsedRows[i][col.key];
+        if (v === null || v === "") continue;
+        tot++;
+        if (typeof v === "number") num++;
+      }
+      if (tot >= 3 && num / tot >= 0.7) {
+        const firstVal = parsedRows[0][col.key];
+        if (typeof firstVal === "string" && firstVal.trim() !== "" && !/^-?\d/.test(firstVal.replace(/,/g, ""))) mismatch++;
+      }
+    });
+    if (mismatch >= 3) {
+      parsedRows.shift();
+    }
+  }
+  
+  columns = columns.filter(col => !col.autogen || parsedRows.some(r => {
+    const v = r[col.key];
+    return v !== null && v !== undefined && String(v).trim() !== "";
+  }));
+  
+  columns.forEach(col => {
+    let num = 0, tot = 0;
+    for (const row of parsedRows) {
+      const v = row[col.key];
+      if (v === null || v === "") continue;
+      tot++;
+      if (typeof v === "number") num++;
+    }
+    col.isNum = tot > 0 && num / tot >= 0.6;
+  });
+  
+  return {
+    id: "ds" + currentDatasetsCount + "_" + Math.random().toString(36).slice(2, 6),
+    platform,
+    kind,
+    fileName,
+    sheetName,
+    columns,
+    rows: parsedRows,
+    kvMode,
+    search: "",
+    sort: { key: null, dir: 1 },
+    page: 0,
+    pageSize: 50
+  };
+};
+
+const parseNumber = (val: any): number => {
+  if (val === null || val === undefined) return 0;
+  if (typeof val === "number") return val;
+  const s = String(val).trim();
+  if (s === "") return 0;
+  let clean = s.replace(/[^0-9.-]/g, "");
+  if (clean.endsWith("-")) {
+    clean = "-" + clean.slice(0, -1);
+  }
+  const num = parseFloat(clean);
+  return isNaN(num) ? 0 : num;
+};
+
+export const ImportOrdersTab: React.FC<ImportOrdersTabProps> = ({
+  isDarkMode,
+  products,
+  onSubmit,
+  onImportProducts,
+  onImportDatasets,
+  onImportProductFiles,
+  triggerAlert,
+  setActiveTab,
+  pendingImportFile,
+  onClearPendingImportFile
+}) => {
+  const [dragActive, setDragActive] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFileData[]>([]);
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [activeDatasetId, setActiveDatasetId] = useState<string | null>(null);
+
+  // Separating import types
+  const [importType, setImportType] = useState<"orders" | "products">("orders");
+  const [updateProductInventory, setUpdateProductInventory] = useState(true);
+
+  // States for product import
+  const [productDragActive, setProductDragActive] = useState(false);
+  const [productFileName, setProductFileName] = useState<string | null>(null);
+  const [parsedProducts, setParsedProducts] = useState<ParsedImportProduct[]>([]);
+
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [selectedRow, setSelectedRow] = useState<Record<string, any> | null>(null);
+  const [selectedRowIdx, setSelectedRowIdx] = useState<number>(-1);
+  const [isColMenuOpen, setIsColMenuOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const [uploadPlatform, setUploadPlatform] = useState<"all" | "lazada" | "shopee" | "tiktok" | "facebook" | "line">("all");
+  const [activeCardDrag, setActiveCardDrag] = useState<"lazada" | "shopee" | "tiktok" | "facebook" | "line" | null>(null);
+
+  // Local state for 2-step verification preview mode
+  const [previewData, setPreviewData] = useState<Order[]>([]);
+  const [previewViewMode, setPreviewViewMode] = useState<"parsed" | "raw">("parsed");
+  const [previewSearch, setPreviewSearch] = useState("");
+  const [previewSort, setPreviewSort] = useState<{ key: keyof Order | null; dir: 1 | -1 }>({ key: null, dir: 1 });
+  const [previewPage, setPreviewPage] = useState(0);
+  const [previewPageSize, setPreviewPageSize] = useState(50);
+
+  useEffect(() => {
+    if (pendingImportFile) {
+      const newDatasets: Dataset[] = [];
+      const newUploadedFiles: UploadedFileData[] = [];
+      const allSheetsData: Record<string, { rows: unknown[][]; headers: string[]; headerRowIndex: number }> = {};
+
+      pendingImportFile.sheets.forEach((sheet) => {
+        const columns: ColumnDef[] = sheet.headers.map((h, c) => {
+          const label = h || `คอลัมน์ ${c + 1}`;
+          return {
+            key: `c${c}`,
+            label,
+            autogen: !h,
+            isId: isIdHeader(label),
+            isMoney: isMoneyHeader(label),
+            visible: true,
+            isNum: false
+          };
+        });
+
+        columns.forEach(col => {
+          let num = 0, tot = 0;
+          sheet.rows.forEach(row => {
+            const v = row[col.label];
+            if (v === null || v === undefined || v === "") return;
+            tot++;
+            const clean = String(v).replace(/[^0-9.-]/g, "");
+            let cleanedStr = clean;
+            if (clean.endsWith("-")) {
+              cleanedStr = "-" + clean.slice(0, -1);
+            }
+            if (/^-?\d+(\.\d+)?$/.test(cleanedStr)) num++;
+          });
+          col.isNum = tot > 0 && num / tot >= 0.6;
+        });
+
+        const rows = sheet.rows.map((row) => {
+          const o: Record<string, any> = {};
+          columns.forEach((col, c) => {
+            const v = row[sheet.headers[c]] ?? null;
+            let parsedVal: any = v;
+            if (!col.isId && typeof v === "string") {
+              const s = v.trim();
+              if (s !== "") {
+                const cl = s.replace(/[^0-9.-]/g, "");
+                let cleanedStr = cl;
+                if (cl.endsWith("-")) {
+                  cleanedStr = "-" + cl.slice(0, -1);
+                }
+                if (/^-?\d+(\.\d+)?$/.test(cleanedStr)) {
+                  parsedVal = Number(cleanedStr);
+                }
+              }
+            }
+            o[col.key] = parsedVal;
+          });
+          return o;
+        });
+
+        const ds: Dataset = {
+          id: `ds${datasets.length + newDatasets.length}_${Math.random().toString(36).slice(2, 6)}`,
+          platform: pendingImportFile.platform,
+          kind: pendingImportFile.type,
+          fileName: pendingImportFile.fileName,
+          sheetName: sheet.name,
+          columns,
+          rows,
+          kvMode: sheet.headers.length <= 2,
+          search: "",
+          sort: { key: null, dir: 1 },
+          page: 0,
+          pageSize: 50
+        };
+
+        if (rows.length > 0) {
+          newDatasets.push(ds);
+        }
+
+        const fileRows: unknown[][] = [
+          sheet.headers,
+          ...sheet.rows.map(row => sheet.headers.map(h => row[h]))
+        ];
+
+        allSheetsData[sheet.name] = {
+          rows: fileRows,
+          headers: sheet.headers,
+          headerRowIndex: 0
+        };
+      });
+
+      const firstSheetName = pendingImportFile.sheets[0]?.name || "";
+      if (firstSheetName) {
+        newUploadedFiles.push({
+          id: pendingImportFile.id,
+          fileName: pendingImportFile.fileName,
+          headers: allSheetsData[firstSheetName].headers,
+          rows: allSheetsData[firstSheetName].rows,
+          headerRowIndex: 0,
+          sheetNames: pendingImportFile.sheets.map(s => s.name),
+          activeSheetName: firstSheetName,
+          allSheetsData,
+          platform: pendingImportFile.platform
+        });
+      }
+
+      if (newDatasets.length > 0) {
+        setDatasets(prev => [...prev, ...newDatasets]);
+        setUploadedFiles(prev => [...prev, ...newUploadedFiles]);
+        setActiveDatasetId(newDatasets[0].id);
+        triggerAlert(`เพิ่มไฟล์ที่ค้างอยู่ "${pendingImportFile.fileName}" เรียบร้อยแล้ว`, "success");
+      }
+
+      if (onClearPendingImportFile) {
+        onClearPendingImportFile();
+      }
+    }
+  }, [pendingImportFile]);
+
+  const hasShopeeOrder = useMemo(() => datasets.some(d => d.platform === "shopee" && d.kind === "order"), [datasets]);
+  const hasShopeeIncome = useMemo(() => datasets.some(d => d.platform === "shopee" && d.kind === "income"), [datasets]);
+  const hasLazadaOrder = useMemo(() => datasets.some(d => d.platform === "lazada" && d.kind === "order"), [datasets]);
+  const hasLazadaIncome = useMemo(() => datasets.some(d => d.platform === "lazada" && d.kind === "income"), [datasets]);
+  const hasTiktokOrder = useMemo(() => datasets.some(d => d.platform === "tiktok" && d.kind === "order"), [datasets]);
+  const hasTiktokIncome = useMemo(() => datasets.some(d => d.platform === "tiktok" && d.kind === "income"), [datasets]);
+  const hasFacebookOrder = useMemo(() => datasets.some(d => d.platform === "facebook" && d.kind === "order"), [datasets]);
+  const hasFacebookIncome = useMemo(() => datasets.some(d => d.platform === "facebook" && d.kind === "income"), [datasets]);
+  const hasLineOrder = useMemo(() => datasets.some(d => d.platform === "line" && d.kind === "order"), [datasets]);
+  const hasLineIncome = useMemo(() => datasets.some(d => d.platform === "line" && d.kind === "income"), [datasets]);
+
+  useEffect(() => {
+    if (datasets.length === 0) {
+      setPreviewData([]);
+      setErrorMsg(null);
+      return;
+    }
+
+    try {
+      setErrorMsg(null);
+      const ordersMap = new Map<string, Order>();
+
+      datasets.forEach((ds) => {
+        const isIncome = ds.kind === "income";
+        const headers = ds.columns.map(c => c.label);
+
+        let idxId = findColIndex(headers, KEY_MAPS.orderId);
+        let idxCust = findColIndex(headers, KEY_MAPS.customerName);
+        let idxProd = findColIndex(headers, KEY_MAPS.productName);
+        let idxQty = findColIndex(headers, KEY_MAPS.quantity);
+        let idxTotal = findColIndex(headers, KEY_MAPS.total);
+        let idxDate = findColIndex(headers, KEY_MAPS.date);
+        let idxShip = findColIndex(headers, KEY_MAPS.shippingFee);
+        const idxPlat = findColIndex(headers, KEY_MAPS.platformFee);
+        let idxNet = findColIndex(headers, KEY_MAPS.netIncome);
+
+        const findCol = (kwList: string[]) => {
+          return headers.findIndex((h) => {
+            const clean = h.trim().toLowerCase();
+            return kwList.some((k) => clean === k.toLowerCase() || clean.includes(k.toLowerCase()));
+          });
+        };
+
+        if (ds.platform === "lazada") {
+          if (!isIncome) {
+            if (idxId === -1) idxId = findCol(["ordernumber", "order id", "หมายเลขคำสั่งซื้อ"]);
+            if (idxCust === -1) idxCust = findCol(["customername", "shippingname", "ชื่อลูกค้า"]);
+            if (idxProd === -1) idxProd = findCol(["itemname", "product name", "ชื่อสินค้า"]);
+            if (idxTotal === -1) idxTotal = findCol(["paidprice", "unitprice", "ราคาขาย"]);
+            if (idxDate === -1) idxDate = findCol(["createtime", "create time"]);
+            if (idxShip === -1) idxShip = findCol(["shippingfee", "ค่าจัดส่ง"]);
+          } else {
+            if (idxId === -1) idxId = findCol(["หมายเลขคำสั่งซื้อ", "ordernumber"]);
+            if (idxProd === -1) idxProd = findCol(["ชื่อสินค้า", "itemname"]);
+            if (idxTotal === -1) idxTotal = findCol(["ยอดชำระ(บาท)", "จำนวนเงิน(รวมภาษี)", "ยอดชำระเงินทั้งหมด"]);
+            if (idxDate === -1) idxDate = findCol(["วันที่ทำรายการ"]);
+          }
+        } else if (ds.platform === "shopee") {
+          if (!isIncome) {
+            if (idxId === -1) idxId = findCol(["หมายเลขคำสั่งซื้อ"]);
+            if (idxCust === -1) idxCust = findCol(["ชื่อผู้ใช้ (ผู้ซื้อ)"]);
+            if (idxProd === -1) idxProd = findCol(["ชื่อสินค้า"]);
+            if (idxQty === -1) idxQty = findCol(["จำนวน"]);
+            if (idxTotal === -1) idxTotal = findCol(["ราคาสุทธิ", "ราคาขายสุทธิ", "ยอดรวมของคำสั่งซื้อ", "ราคาขาย", "ราคาสินค้าที่ชำระโดยผู้ซื้อ (thb)"]);
+            if (idxDate === -1) idxDate = findCol(["เวลาสั่งซื้อ", "เวลาที่ชำระเงิน"]);
+            if (idxShip === -1) idxShip = findCol(["ค่าจัดส่ง"]);
+          } else {
+            if (idxId === -1) idxId = findCol(["หมายเลขคำสั่งซื้อ"]);
+            if (idxCust === -1) idxCust = findCol(["ชื่อผู้ซื้อ", "ชื่อผู้ใช้ (ผู้ซื้อ)"]);
+            if (idxTotal === -1) idxTotal = findCol(["สินค้าราคาปกติ", "ยอดรวมของคำสั่งซื้อ", "ราคาสินค้าที่ชำระโดยผู้ซื้อ (thb)"]);
+            if (idxDate === -1) idxDate = findCol(["เวลาสั่งซื้อ", "วันที่โอนชำระเงินสำเร็จ"]);
+            if (idxNet === -1) idxNet = findCol(["จำนวนเงินโอนสุทธิ", "จำนวนเงินทั้งหมดที่โอนแล้ว (฿)"]);
+          }
+        }
+
+        // Headerless Express file mapping
+        if (idxId === -1 && (ds.platform === "facebook" || ds.platform === "line")) {
+          const isHeaderless = headers.some(h => h.startsWith("คอลัมน์")) || headers[0] === "1" || headers[0] === "2" || headers[0] === "16";
+          if (isHeaderless && headers.length >= 10) {
+            idxId = 1;      // คอลัมน์ 2 (Order ID)
+            idxDate = 2;    // คอลัมน์ 3 (Date)
+            idxCust = 6;    // คอลัมน์ 7 (Customer Name)
+            idxProd = 8;    // คอลัมน์ 9 (Product Name)
+            idxQty = 9;     // คอลัมน์ 10 (Quantity)
+            idxTotal = 16;  // คอลัมน์ 17 (Total)
+            idxNet = 16;
+          }
+        }
+
+        if (idxId === -1) {
+          throw new Error(`ไฟล์ "${ds.fileName}" (${ds.sheetName}) ไม่มีหมายเลขคำสั่งซื้อ (Order ID)`);
+        }
+
+        ds.rows.forEach((row) => {
+          const rawId = row[`c${idxId}`];
+          if (rawId === null || rawId === undefined || String(rawId).trim() === "") return;
+
+          const orderId = String(rawId).trim();
+          let customerName = idxCust !== -1 && row[`c${idxCust}`] ? String(row[`c${idxCust}`]).trim() : "ลูกค้าทั่วไป";
+          if (customerName.includes("/")) {
+            const parts = customerName.split("/");
+            customerName = parts[parts.length - 1].trim() || customerName;
+          }
+          let productName = idxProd !== -1 && row[`c${idxProd}`] ? String(row[`c${idxProd}`]).trim() : (isIncome ? "รายการรายรับบัญชี" : "ไม่ระบุสินค้า");
+          
+          if (ds.platform === "tiktok" && isIncome && productName.includes("*")) {
+            productName = "รายการสินค้า (TikTok)";
+          }
+
+          const quantity = idxQty !== -1 && row[`c${idxQty}`] !== null ? Math.max(1, Math.round(parseNumber(row[`c${idxQty}`]))) : 1;
+          const rawAmount = idxTotal !== -1 && row[`c${idxTotal}`] !== null ? parseNumber(row[`c${idxTotal}`]) : 0;
+          const shippingFee = idxShip !== -1 && row[`c${idxShip}`] !== null ? Math.abs(parseNumber(row[`c${idxShip}`])) : 0;
+          
+          let total: number;
+          let platformFee = 0;
+          let netIncome: number;
+
+          if (ds.platform === "lazada" && isIncome) {
+            if (rawAmount > 0) {
+              total = rawAmount;
+              platformFee = 0;
+            } else {
+              total = 0;
+              platformFee = Math.abs(rawAmount);
+            }
+            netIncome = rawAmount;
+          } else {
+            total = Math.abs(rawAmount);
+            if (ds.platform === "shopee") {
+              const feeKeywords = ["ค่าคอมมิชชั่น", "transaction fee", "ค่าบริการ", "ค่าธรรมเนียมโครงสร้างพื้นฐานแพลตฟอร์ม", "ค่าธุรกรรมการชำระเงิน", "ค่าคอมมิชชั่น ams", "ค่าธรรมเนียม ของโปรแกรมประหยัดค่าจัดส่ง", "ค่าธรรมเนียม"];
+              headers.forEach((h, cIdx) => {
+                const hLower = h.toLowerCase();
+                if (feeKeywords.some(kw => hLower.includes(kw))) {
+                  const val = row[`c${cIdx}`];
+                  if (val !== undefined && val !== null && val !== "") {
+                    platformFee += Math.abs(parseNumber(val));
+                  }
+                }
+              });
+            } else {
+              platformFee = idxPlat !== -1 && row[`c${idxPlat}`] !== null ? Math.abs(parseNumber(row[`c${idxPlat}`])) : 0;
+            }
+            netIncome = idxNet !== -1 && row[`c${idxNet}`] !== null 
+              ? parseNumber(row[`c${idxNet}`]) 
+              : (isIncome ? total : total - shippingFee - platformFee);
+          }
+
+          const rawDate = idxDate !== -1 ? row[`c${idxDate}`] : null;
+          const dateStr = rawDate ? parseAndNormalizeDate(rawDate) : new Date().toISOString().split("T")[0];
+
+          // Resolve brand auto-detection
+          let brand = "";
+          if (productName && productName !== "ไม่ระบุสินค้า" && productName !== "รายการรายรับบัญชี") {
+            const prod = products.find(p => p.name.toLowerCase() === productName.toLowerCase());
+            if (prod) brand = prod.brand;
+          }
+          if (!brand || brand === "ทั่วไป" || brand === "ไม่ระบุแบรนด์") {
+            const cleanName = productName.toLowerCase();
+            if (cleanName.includes("l'angel") || cleanName.includes("langel")) brand = "L'angel";
+            else if (cleanName.includes("valente")) brand = "Valente";
+            else if (cleanName.includes("barber brain") || cleanName.includes("barberbrain")) brand = "Barber Brain";
+            else brand = "สินค้าอื่นๆที่ไม่มีแบรนด์";
+          }
+
+          const channelName = ds.platform === "tiktok" ? "TikTok Shop" : ds.platform === "lazada" ? "Lazada" : ds.platform === "shopee" ? "Shopee" : ds.platform === "facebook" ? "Facebook" : ds.platform === "line" ? "LINE OA" : "ทั่วไป";
+
+          const matchingFile = uploadedFiles.find(f => f.fileName === ds.fileName);
+          const datasetIdForOrder = matchingFile?.id || ds.id;
+
+          const orderItem: Order = {
+            id: orderId,
+            customerName,
+            email: "",
+            productName,
+            quantity,
+            total,
+            status: "Paid",
+            date: dateStr,
+            shippingFee,
+            platformFee,
+            netIncome,
+            isIncome,
+            channel: channelName,
+            brand: brand || "สินค้าอื่นๆที่ไม่มีแบรนด์",
+            datasetId: datasetIdForOrder
+          };
+
+          const existing = ordersMap.get(orderId);
+          if (!existing) {
+            ordersMap.set(orderId, orderItem);
+          } else {
+            if (isIncome) {
+              if (ds.platform === "lazada") {
+                if (total > 0) {
+                  existing.total = (existing.total || 0) + total;
+                } else {
+                  existing.platformFee = (existing.platformFee || 0) + platformFee;
+                }
+                existing.netIncome = (existing.netIncome || 0) + netIncome;
+              } else {
+                existing.platformFee = (existing.platformFee || 0) + platformFee;
+                existing.netIncome = (existing.netIncome || 0) + netIncome;
+              }
+              existing.hasNetIncome = true;
+              if (existing.productName === "ไม่ระบุสินค้า" && productName !== "รายการรายรับบัญชี") {
+                existing.productName = productName;
+              }
+            } else {
+              existing.customerName = customerName || existing.customerName;
+              existing.productName = productName !== "รายการรายรับบัญชี" ? productName : existing.productName;
+              existing.quantity = quantity || existing.quantity;
+              existing.total = total || existing.total;
+              existing.netIncome = netIncome || existing.netIncome;
+              existing.platformFee = platformFee || existing.platformFee;
+              existing.date = dateStr || existing.date;
+              existing.shippingFee = shippingFee || existing.shippingFee;
+              existing.brand = brand || existing.brand;
+            }
+          }
+        });
+      });
+
+      const mergedOrders = Array.from(ordersMap.values());
+
+      // Post-process merged orders to apply standard calculation rules and round decimals
+      mergedOrders.forEach((order) => {
+        if (!order.isIncome) {
+          if (!order.netIncome || order.netIncome === 0) {
+            order.netIncome = Math.max(0, (order.total || 0) - (order.platformFee || 0) - (order.shippingFee || 0));
+          }
+        } else {
+          if (order.channel === "Shopee") {
+            order.total = (order.netIncome || 0) + (order.platformFee || 0);
+          } else if (order.channel === "Lazada") {
+            if (!order.total || order.total === 0) {
+              order.total = Math.max(0, (order.netIncome || 0) + (order.platformFee || 0));
+            }
+          } else if (order.channel === "TikTok Shop") {
+            if (!order.netIncome || order.netIncome === 0) {
+              order.netIncome = Math.max(0, (order.total || 0) - (order.platformFee || 0) - (order.shippingFee || 0));
+            }
+          }
+        }
+
+        order.total = Math.round((order.total || 0) * 100) / 100;
+        order.platformFee = Math.round((order.platformFee || 0) * 100) / 100;
+        order.shippingFee = Math.round((order.shippingFee || 0) * 100) / 100;
+        order.netIncome = Math.round((order.netIncome || 0) * 100) / 100;
+      });
+
+      setPreviewData(mergedOrders);
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : String(e));
+      setPreviewData([]);
+    }
+  }, [datasets, products, uploadedFiles]);
+
+  const handleDeleteFile = (fileName: string) => {
+    setUploadedFiles(prev => prev.filter(f => f.fileName !== fileName));
+    setDatasets(prev => {
+      const remaining = prev.filter(d => d.fileName !== fileName);
+      if (activeDatasetId && prev.find(d => d.id === activeDatasetId)?.fileName === fileName) {
+        setActiveDatasetId(remaining[0]?.id || null);
+      }
+      return remaining;
+    });
+  };
+
+  const handleReset = () => {
+    setUploadedFiles([]);
+    setDatasets([]);
+    setActiveDatasetId(null);
+    setErrorMsg(null);
+    setPreviewData([]);
+    setPreviewSearch("");
+    setPreviewSort({ key: null, dir: 1 });
+    setPreviewPage(0);
+    setPreviewViewMode("parsed");
+  };
+
+  const handleAutoProcessAndSubmit = () => {
+    if (previewData.length === 0) return;
+    try {
+      // บันทึกชุดข้อมูล Orders ลงใน localStorage ภายใต้ Key 'mock_supabase_orders'
+      try {
+        const existingSaved = localStorage.getItem("mock_supabase_orders");
+        let updatedOrders: Order[] = [];
+        if (existingSaved) {
+          try {
+            const parsedExisting = JSON.parse(existingSaved);
+            if (Array.isArray(parsedExisting)) {
+              updatedOrders = parsedExisting;
+            }
+          } catch (e) {
+            console.error("Failed to parse existing mock_supabase_orders:", e);
+          }
+        } else {
+          // ดึงจาก 'orders' เป็นตัวสำรองเริ่มต้น
+          const backup = localStorage.getItem("orders");
+          if (backup) {
+            try {
+              const parsedBackup = JSON.parse(backup);
+              if (Array.isArray(parsedBackup)) {
+                updatedOrders = parsedBackup;
+              }
+            } catch (e) {
+              console.error("Failed to parse backup orders:", e);
+            }
+          }
+        }
+
+        const updatedOrdersMap = new Map(updatedOrders.map(o => [o.id, o]));
+        previewData.forEach((incoming) => {
+          const existing = updatedOrdersMap.get(incoming.id);
+          if (existing) {
+            existing.total = incoming.total;
+            existing.netIncome = incoming.netIncome;
+            existing.platformFee = incoming.platformFee;
+            existing.shippingFee = incoming.shippingFee;
+            existing.quantity = incoming.quantity;
+            existing.customerName = incoming.customerName || existing.customerName;
+            existing.productName = incoming.productName !== "รายการรายรับบัญชี" ? incoming.productName : existing.productName;
+            existing.date = incoming.date || existing.date;
+            existing.brand = incoming.brand || existing.brand;
+            existing.isIncome = incoming.isIncome;
+            existing.channel = incoming.channel;
+          } else {
+            updatedOrdersMap.set(incoming.id, incoming);
+          }
+        });
+        const finalOrders = Array.from(updatedOrdersMap.values());
+
+        localStorage.setItem("mock_supabase_orders", JSON.stringify(finalOrders));
+        localStorage.setItem("orders", JSON.stringify(finalOrders));
+        window.dispatchEvent(new Event("mock_supabase_orders_updated"));
+      } catch (err) {
+        console.error("Error saving mock_supabase_orders:", err);
+      }
+
+      onSubmit(previewData, updateProductInventory);
+
+      if (onImportDatasets) {
+        const newUploadedDatasets: UploadedDataset[] = uploadedFiles.map((file) => {
+          const sheetsData = file.sheetNames?.map(name => {
+            const headers = file.allSheetsData?.[name]?.headers || [];
+            const dataRows = file.allSheetsData?.[name]?.rows || [];
+            const recordRows = dataRows.map(row => {
+              const obj: Record<string, unknown> = {};
+              headers.forEach((h, c) => {
+                obj[h] = row[c] ?? null;
+              });
+              return obj;
+            });
+            return {
+              name,
+              headers,
+              rows: recordRows
+            };
+          }) || [];
+
+          return {
+            id: file.id || generateUniqueId("ds"),
+            fileName: file.fileName,
+            platform: file.platform,
+            type: (detectKind(file.fileName, file.activeSheetName || "") === "income" ? "income" : "order") as any,
+            uploadedAt: getCurrentFormattedDate(),
+            sheets: sheetsData
+          };
+        });
+        onImportDatasets(newUploadedDatasets);
+      }
+
+      triggerAlert(`นำเข้าข้อมูลคำสั่งซื้อรวม ${previewData.length} รายการเรียบร้อยแล้ว`, "success");
+      handleReset();
+      setActiveTab("dashboard");
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : String(e));
+      triggerAlert(e instanceof Error ? e.message : "เกิดข้อผิดพลาดในการประมวลผล", "error");
+    }
+  };
+
+  const handleUploadFile = (file: File, forcedPlatform?: Dataset["platform"]) => {
+    const fileId = generateUniqueId("f");
+    const isExcel = file.name.endsWith(".xlsx") || file.name.endsWith(".xls");
+    const reader = new FileReader();
+    const defaultKind = detectKind(file.name, "Default");
+
+    if (isExcel) {
+      reader.onload = (event) => {
+        try {
+          const data = new Uint8Array(event.target?.result as ArrayBuffer);
+          const workbook = XLSX.read(data, { type: "array" });
+          const sheetNames = workbook.SheetNames;
+
+          let firstValidSheet: string | null = null;
+          const newDatasets: Dataset[] = [];
+          const allSheetsData: Record<string, { rows: unknown[][]; headers: string[]; headerRowIndex: number }> = {};
+          let platformType = forcedPlatform || detectPlatform(file.name);
+
+          for (const sheetName of sheetNames) {
+            const ws = workbook.Sheets[sheetName];
+            if (!ws) continue;
+            const rawAoa = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1, raw: true, defval: null, blankrows: false });
+            if (!rawAoa.length) continue;
+
+            const parsed = parseFileRows(rawAoa);
+            const sk = sheetKind(sheetName);
+            const detected = determinePlatform(file.name, parsed.headers);
+
+            if (forcedPlatform && detected !== "unknown" && detected !== forcedPlatform) {
+              const displayDetected = detected === "lazada" ? "Lazada" : detected === "shopee" ? "Shopee" : "TikTok Shop";
+              const displayTarget = forcedPlatform === "lazada" ? "Lazada" : forcedPlatform === "shopee" ? "Shopee" : "TikTok Shop";
+              throw new Error(`ไฟล์ "${file.name}" เป็นไฟล์ของแพลตฟอร์ม ${displayDetected} ซึ่งไม่ตรงกับแพลตฟอร์ม ${displayTarget} ที่คุณเลือกอัปโหลด`);
+            }
+
+            if (platformType === "unknown" && detected !== "unknown") {
+              platformType = detected;
+            }
+
+            allSheetsData[sheetName] = {
+              rows: parsed.rows,
+              headers: parsed.headers,
+              headerRowIndex: parsed.headerRowIndex
+            };
+
+            const isTxSheet = !(sk === "report" || sk === "withdraw" || sk === "glossary");
+            if (isTxSheet && !firstValidSheet) {
+              firstValidSheet = sheetName;
+            }
+
+            let thisKind = defaultKind;
+            if (sk === "withdraw") thisKind = "withdraw";
+            else if (sk === "report") thisKind = "report";
+            else if (sk === "glossary") thisKind = "glossary";
+
+            const ds = buildDataset(workbook, sheetName, file.name, platformType, thisKind, datasets.length + newDatasets.length);
+            if (ds && ds.rows.length > 0) {
+              newDatasets.push(ds);
+            }
+          }
+
+          if (!firstValidSheet && sheetNames.length > 0) {
+            firstValidSheet = sheetNames[0];
+          }
+
+          if (!firstValidSheet) {
+            triggerAlert(`ไฟล์ "${file.name}" ไม่มีชีตที่มีข้อมูล`, "warning");
+            return;
+          }
+
+          const activeSheet = allSheetsData[firstValidSheet];
+          const newUploadedFile: UploadedFileData = {
+            id: fileId,
+            fileName: file.name,
+            rows: activeSheet.rows,
+            headers: activeSheet.headers,
+            headerRowIndex: activeSheet.headerRowIndex,
+            sheetNames: sheetNames,
+            activeSheetName: firstValidSheet,
+            allSheetsData,
+            platform: platformType
+          };
+
+          setUploadedFiles(prev => [...prev, newUploadedFile]);
+          if (newDatasets.length > 0) {
+            setDatasets(prev => [...prev, ...newDatasets]);
+            if (!activeDatasetId) {
+              setActiveDatasetId(newDatasets[0].id);
+            }
+          }
+          triggerAlert(`เพิ่มไฟล์ "${file.name}" เรียบร้อยแล้ว`, "success");
+        } catch (e) {
+          console.error(e);
+          triggerAlert(e instanceof Error ? e.message : `อ่านไฟล์ "${file.name}" ล้มเหลว`, "error");
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.onload = (event) => {
+        try {
+          const text = event.target?.result as string;
+          const rows = parseCSV(text);
+          if (rows.length === 0) {
+            triggerAlert(`ไฟล์ "${file.name}" ไม่มีข้อมูล`, "warning");
+            return;
+          }
+
+          let platformType = forcedPlatform || detectPlatform(file.name);
+          const kind = detectKind(file.name, "Default");
+          const parsed = parseFileRows(rows);
+          const detected = determinePlatform(file.name, parsed.headers);
+
+          if (forcedPlatform && detected !== "unknown" && detected !== forcedPlatform) {
+            const displayDetected = detected === "lazada" ? "Lazada" : detected === "shopee" ? "Shopee" : "TikTok Shop";
+            const displayTarget = forcedPlatform === "lazada" ? "Lazada" : forcedPlatform === "shopee" ? "Shopee" : "TikTok Shop";
+            throw new Error(`ไฟล์ "${file.name}" เป็นไฟล์ของแพลตฟอร์ม ${displayDetected} ซึ่งไม่ตรงกับแพลตฟอร์ม ${displayTarget} ที่คุณเลือกอัปโหลด`);
+          }
+
+          if (platformType === "unknown" && detected !== "unknown") {
+            platformType = detected;
+          }
+
+          const allSheetsData = {
+            Default: {
+              rows: parsed.rows,
+              headers: parsed.headers,
+              headerRowIndex: parsed.headerRowIndex
+            }
+          };
+
+          const newUploadedFile: UploadedFileData = {
+            id: fileId,
+            fileName: file.name,
+            rows: parsed.rows,
+            headers: parsed.headers,
+            headerRowIndex: parsed.headerRowIndex,
+            sheetNames: ["Default"],
+            activeSheetName: "Default",
+            allSheetsData,
+            platform: platformType
+          };
+
+          const { idx } = detectHeaderRow(rows);
+          const headerRow = rows[idx] || [];
+          const dataRows = rows.slice(idx + 1).filter(r => r.some(c => c !== null && String(c).trim() !== ""));
+          const maxCols = Math.max(headerRow.length, ...dataRows.map(r => r.length), 1);
+
+          const columns: ColumnDef[] = [];
+          for (let c = 0; c < maxCols; c++) {
+            const raw = headerRow[c];
+            const auto = false;
+            const lbl = raw === null || raw === undefined || String(raw).trim() === "" ? `คอลัมน์ ${c + 1}` : String(raw).trim();
+            columns.push({
+              key: `c${c}`,
+              label: lbl,
+              autogen: auto,
+              isId: isIdHeader(lbl),
+              isMoney: isMoneyHeader(lbl),
+              visible: true,
+              isNum: false
+            });
+          }
+
+          const parsedRows = dataRows.map(r => {
+            const o: Record<string, any> = {};
+            columns.forEach((col, c) => {
+              const v = r[c] === undefined ? null : r[c];
+              let parsedVal: any = v;
+              if (!col.isId && typeof v === "string") {
+                const s = v.trim();
+                if (s !== "") {
+                  const cl = s.replace(/,/g, "");
+                  if (/^-?\d+(\.\d+)?$/.test(cl)) parsedVal = Number(cl);
+                }
+              }
+              o[col.key] = parsedVal;
+            });
+            return o;
+          });
+
+          const ds: Dataset = {
+            id: `ds${datasets.length}_${Math.random().toString(36).slice(2, 6)}`,
+            platform: platformType,
+            kind,
+            fileName: file.name,
+            sheetName: "Default",
+            columns,
+            rows: parsedRows,
+            kvMode: false,
+            search: "",
+            sort: { key: null, dir: 1 },
+            page: 0,
+            pageSize: 50
+          };
+
+          setUploadedFiles(prev => [...prev, newUploadedFile]);
+          setDatasets(prev => [...prev, ds]);
+          if (!activeDatasetId) {
+            setActiveDatasetId(ds.id);
+          }
+          triggerAlert(`เพิ่มไฟล์ "${file.name}" เรียบร้อยแล้ว`, "success");
+        } catch (e) {
+          console.error(e);
+          triggerAlert(e instanceof Error ? e.message : `อ่านไฟล์ "${file.name}" ล้มเหลว`, "error");
+        }
+      };
+      reader.readAsText(file, "UTF-8");
+    }
+  };
+
+  const isProductFileName = (name: string): boolean => {
+    const n = name.toLowerCase();
+    const isTransaction = n.includes("order") || n.includes("sales") || n.includes("income") || n.includes("lazada") || n.includes("shopee") || n.includes("tiktok") || n.includes("page365") || n.includes("lineoa");
+    if (isTransaction) return false;
+    return n.includes("product") || n.includes("inventory") || n.includes("stock") || n.includes("catalog");
+  };
+
+  const determineFileTypeFromHeadersAndName = (name: string, headers: string[]): "product" | "sales" | "income" => {
+    const n = name.toLowerCase();
+    const h = headers.map(x => String(x).toLowerCase().trim());
+    const hasProductKeywordInName = n.includes("product") || n.includes("inventory") || n.includes("stock") || n.includes("catalog");
+
+    const orderHeaders = ["order id", "รหัสคำสั่งซื้อ", "หมายเลขคำสั่งซื้อ", "order_id", "order no"];
+    const incomeHeaders = ["รายรับ", "โอนเงิน", "รายได้", "payout", "net income"];
+    const productHeaders = ["แบรนด์", "หมวดหมู่", "ราคา", "สต็อก", "สินค้า"];
+
+    const hasOrderHeaders = h.some(x => orderHeaders.some(oh => x.includes(oh)));
+    const hasIncomeHeaders = h.some(x => incomeHeaders.some(ih => x.includes(ih)));
+    const hasProductHeaders = h.some(x => productHeaders.some(ph => x.includes(ph)));
+
+    if (hasProductKeywordInName && !hasOrderHeaders && !hasIncomeHeaders) return "product";
+    if (hasProductHeaders && !hasOrderHeaders && !hasIncomeHeaders) return "product";
+    if (n.includes("income") || hasIncomeHeaders) return "income";
+    return "sales";
+  };
+
+  const detectUploadedFileType = (file: File): Promise<"product" | "sales" | "income"> => {
+    return new Promise((resolve) => {
+      const isExcel = file.name.endsWith(".xlsx") || file.name.endsWith(".xls");
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const data = new Uint8Array(e.target?.result as ArrayBuffer);
+          let headers: string[] = [];
+          if (isExcel) {
+            const workbook = XLSX.read(data, { type: "array" });
+            const sheetName = workbook.SheetNames[0];
+            const worksheet = workbook.Sheets[sheetName];
+            if (worksheet) {
+              const rawRows = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1 });
+              if (rawRows.length > 0) {
+                headers = (rawRows[0] || []).map(x => String(x).trim());
+              }
+            }
+          } else {
+            const text = new TextDecoder().decode(data);
+            const lines = text.split("\n");
+            if (lines.length > 0) {
+              headers = lines[0].split(",").map(x => x.replace(/"/g, "").trim());
+            }
+          }
+          const fileType = determineFileTypeFromHeadersAndName(file.name, headers);
+          resolve(fileType);
+        } catch {
+          resolve(isProductFileName(file.name) ? "product" : "sales");
+        }
+      };
+      reader.onerror = () => {
+        resolve(isProductFileName(file.name) ? "product" : "sales");
+      };
+      reader.readAsArrayBuffer(file.slice(0, 1024 * 50));
+    });
+  };
+
+  const routeAndUploadFile = async (file: File, forcedPlatform?: Dataset["platform"]) => {
+    const fileType = await detectUploadedFileType(file);
+    if (fileType === "product") {
+      setImportType("products");
+      handleReset();
+      handleProductUploadFile(file);
+      triggerAlert(`นำเข้าไฟล์ข้อมูลสินค้าคงคลัง "${file.name}" เรียบร้อยแล้ว`, "success");
+    } else {
+      setImportType("orders");
+      handleProductReset();
+      handleUploadFile(file, forcedPlatform);
+    }
+  };
+
+  const uploadRef = useRef<any>(null);
+  const platformRef = useRef<any>(null);
+  uploadRef.current = routeAndUploadFile;
+  platformRef.current = uploadPlatform;
+
+  useEffect(() => {
+    const handleGlobalDragOver = (e: DragEvent) => e.preventDefault();
+    const handleGlobalDrop = (e: DragEvent) => {
+      e.preventDefault();
+      if (e.dataTransfer?.files?.length) {
+        const forced = platformRef.current === "all" ? undefined : platformRef.current;
+        Array.from(e.dataTransfer.files).forEach(file => {
+          uploadRef.current(file, forced);
+        });
+      }
+    };
+    window.addEventListener("dragover", handleGlobalDragOver);
+    window.addEventListener("drop", handleGlobalDrop);
+    return () => {
+      window.removeEventListener("dragover", handleGlobalDragOver);
+      window.removeEventListener("drop", handleGlobalDrop);
+    };
+  }, []);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const forced = uploadPlatform === "all" ? undefined : uploadPlatform;
+      Array.from(e.target.files).forEach(file => routeAndUploadFile(file, forced));
+      e.target.value = "";
+    }
+  };
+
+  const handleDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") setDragActive(true);
+    else if (e.type === "dragleave") setDragActive(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const forced = uploadPlatform === "all" ? undefined : uploadPlatform;
+      Array.from(e.dataTransfer.files).forEach(file => routeAndUploadFile(file, forced));
+    }
+  };
+
+  const handleCardDrag = (e: React.DragEvent, platform: any) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") setActiveCardDrag(platform);
+    else if (e.type === "dragleave" || e.type === "drop") setActiveCardDrag(null);
+  };
+
+  const handleCardDrop = (e: React.DragEvent, platform: any) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setActiveCardDrag(null);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      Array.from(e.dataTransfer.files).forEach(file => routeAndUploadFile(file, platform));
+    }
+  };
+
+  const downloadProductTemplate = () => {
+    const csvContent = "\uFEFF" + "ชื่อสินค้า,หมวดหมู่,แบรนด์,ราคา,สต็อก\nตัวอย่างสินค้า A,Electronics,ทั่วไป,299,50\nตัวอย่างสินค้า B,Apparel,L'angel,590,20\n";
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", "product_template.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const processProductRows = (rows: unknown[][]) => {
+    try {
+      if (rows.length < 2) throw new Error("ไฟล์ไม่มีข้อมูลสินค้า");
+
+      let headerRowIndex = 0;
+      let maxScore = -1;
+      
+      for (let i = 0; i < Math.min(rows.length, 15); i++) {
+        const row = rows[i];
+        if (!row || !Array.isArray(row)) continue;
+        const rowStrings = row.map(cell => String(cell || "").trim());
+        const nonEmptyCount = rowStrings.filter(cell => cell !== "").length;
+        
+        let keywordMatches = 0;
+        if (findColIndex(rowStrings, KEY_MAPS_PRODUCT.name) !== -1) keywordMatches++;
+        if (findColIndex(rowStrings, KEY_MAPS_PRODUCT.price) !== -1) keywordMatches++;
+        
+        const score = (keywordMatches * 100) + nonEmptyCount;
+        
+        if (score > maxScore) {
+          maxScore = score;
+          headerRowIndex = i;
+        }
+      }
+
+      const headers = rows[headerRowIndex].map(h => String(h || ""));
+      const idxName = findColIndex(headers, KEY_MAPS_PRODUCT.name);
+      const idxCat = findColIndex(headers, KEY_MAPS_PRODUCT.category);
+      const idxBrand = findColIndex(headers, KEY_MAPS_PRODUCT.brand);
+      const idxPrice = findColIndex(headers, KEY_MAPS_PRODUCT.price);
+      const idxStock = findColIndex(headers, KEY_MAPS_PRODUCT.stock);
+
+      if (idxName === -1 || idxPrice === -1) {
+        throw new Error("รูปแบบคอลัมน์ไม่ถูกต้อง กรุณาตรวจสอบว่ามีหัวคอลัมน์ ชื่อสินค้า และราคา");
+      }
+
+      const productsList: ParsedImportProduct[] = rows
+        .slice(headerRowIndex + 1)
+        .filter((row) => row.length >= 2 && row.some((c) => c !== undefined && c !== null && String(c).trim()))
+        .map((row) => {
+          const nameVal = row[idxName] ? String(row[idxName]).trim() : "";
+          const catRaw = idxCat !== -1 ? (row[idxCat] ? String(row[idxCat]).trim() : "Electronics") : "Electronics";
+          
+          let catMatched: Product["category"] = "Electronics";
+          let hasCatError = false;
+          const cleanCat = catRaw.toLowerCase();
+          if (cleanCat.includes("elect") || cleanCat.includes("ไฟ")) catMatched = "Electronics";
+          else if (cleanCat.includes("apparel") || cleanCat.includes("เสื้อ") || cleanCat.includes("ผ้า") || cleanCat.includes("แฟชั่น")) catMatched = "Apparel";
+          else if (cleanCat.includes("home") || cleanCat.includes("บ้าน") || cleanCat.includes("ของใช้")) catMatched = "Home";
+          else if (cleanCat.includes("beauty") || cleanCat.includes("งาม") || cleanCat.includes("สำอาง") || cleanCat.includes("บำรุง")) catMatched = "Beauty";
+          else {
+            hasCatError = true;
+          }
+
+          let brandVal = idxBrand !== -1 ? (row[idxBrand] ? String(row[idxBrand]).trim() : "ทั่วไป") : "ทั่วไป";
+          if (!brandVal || brandVal === "ทั่วไป" || brandVal === "ไม่ระบุแบรนด์") {
+            const cleanName = nameVal.toLowerCase();
+            if (cleanName.includes("l'angel") || cleanName.includes("langel")) brandVal = "L'angel";
+            else if (cleanName.includes("valente")) brandVal = "Valente";
+            else if (cleanName.includes("barber brain") || cleanName.includes("barberbrain")) brandVal = "Barber Brain";
+            else brandVal = "สินค้าอื่นๆที่ไม่มีแบรนด์";
+          }
+
+          const priceVal = parseFloat(String(row[idxPrice] || "").replace(/[^0-9.]/g, "")) || 0;
+          const stockVal = idxStock !== -1 ? (parseInt(String(row[idxStock] || ""), 10) || 0) : 0;
+
+          let warnings: string | null = null;
+          if (!nameVal) warnings = "ไม่มีชื่อสินค้า";
+          else if (priceVal <= 0) warnings = "ราคาต้องมากกว่า 0";
+          else if (hasCatError) warnings = `หมวดหมู่ '${catRaw}' ไม่ถูกต้อง (อนุญาต: Electronics, Apparel, Home, Beauty)`;
+
+          return {
+            name: nameVal,
+            category: catMatched,
+            brand: brandVal,
+            price: priceVal,
+            stock: stockVal,
+            warnings
+          };
+        });
+
+      setParsedProducts(productsList);
+      setErrorMsg(null);
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : String(e));
+      setParsedProducts([]);
+    }
+  };
+
+  const handleProductUploadFile = (file: File) => {
+    setProductFileName(file.name);
+    const isExcel = file.name.endsWith(".xlsx") || file.name.endsWith(".xls");
+    const reader = new FileReader();
+
+    if (isExcel) {
+      reader.onload = (event) => {
+        try {
+          const data = new Uint8Array(event.target?.result as ArrayBuffer);
+          const workbook = XLSX.read(data, { type: "array" });
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+          const rawRows = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1 });
+          processProductRows(rawRows);
+        } catch (e) {
+          setErrorMsg(e instanceof Error ? e.message : String(e));
+          setParsedProducts([]);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.onload = (event) => {
+        try {
+          const text = event.target?.result as string;
+          const rows = parseCSV(text);
+          processProductRows(rows);
+        } catch (e) {
+          setErrorMsg(e instanceof Error ? e.message : String(e));
+          setParsedProducts([]);
+        }
+      };
+      reader.readAsText(file, "UTF-8");
+    }
+  };
+
+  const handleProductDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") setProductDragActive(true);
+    else if (e.type === "dragleave") setProductDragActive(false);
+  };
+
+  const handleProductDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setProductDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      routeAndUploadFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleProductFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      routeAndUploadFile(e.target.files[0]);
+    }
+  };
+
+  const productValidCount = useMemo(() => {
+    return parsedProducts.filter((p) => !p.warnings).length;
+  }, [parsedProducts]);
+
+  const handleProductImportSubmit = () => {
+    const validProducts = parsedProducts.filter((p) => !p.warnings);
+    if (validProducts.length === 0) {
+      triggerAlert("ไม่มีข้อมูลสินค้าที่ถูกต้องที่จะนำเข้า", "error");
+      return;
+    }
+    if (onImportProducts) {
+      onImportProducts(
+        validProducts.map((p) => ({
+          name: p.name,
+          category: p.category,
+          brand: p.brand,
+          price: p.price,
+          stock: p.stock,
+        }))
+      );
+    }
+    if (onImportProductFiles) {
+      const productDataset: UploadedDataset = {
+        id: generateUniqueId("ds_prod"),
+        fileName: productFileName || "product_data.xlsx",
+        platform: "unknown",
+        type: "order",
+        fileType: "product",
+        sheets: [
+          {
+            name: "Products",
+            headers: ["ชื่อสินค้า", "หมวดหมู่", "แบรนด์", "ราคา", "สต็อก"],
+            rows: validProducts.map(p => ({
+              "ชื่อสินค้า": p.name,
+              "หมวดหมู่": p.category,
+              "แบรนด์": p.brand || "",
+              "ราคา": p.price,
+              "สต็อก": p.stock
+            }))
+          }
+        ],
+        uploadedAt: getCurrentFormattedDate()
+      };
+      onImportProductFiles([productDataset]);
+    }
+    triggerAlert(`นำเข้าข้อมูลสินค้าคงคลังจำนวน ${validProducts.length} รายการเรียบร้อยแล้ว`, "success");
+    handleProductReset();
+  };
+
+  const handleProductReset = () => {
+    setProductFileName(null);
+    setParsedProducts([]);
+    setProductDragActive(false);
+    setErrorMsg(null);
+    setImportType("orders");
+  };
+
+  const activeDataset = useMemo(() => {
+    return datasets.find((d) => d.id === activeDatasetId) || null;
+  }, [datasets, activeDatasetId]);
+
+  const filteredRows = useMemo(() => {
+    if (!activeDataset) return [];
+    let items = activeDataset.rows;
+    if (activeDataset.search) {
+      const q = activeDataset.search.toLowerCase();
+      items = items.filter((row) => 
+        Object.values(row).some((val) => String(val || "").toLowerCase().includes(q))
+      );
+    }
+    return items;
+  }, [activeDataset, activeDataset?.search]);
+
+  const filteredAndSortedPreview = useMemo(() => {
+    let list = [...previewData];
+
+    // Search
+    if (previewSearch.trim()) {
+      const q = previewSearch.toLowerCase();
+      list = list.filter(o => 
+        o.id.toLowerCase().includes(q) ||
+        o.customerName.toLowerCase().includes(q) ||
+        o.productName.toLowerCase().includes(q) ||
+        o.channel.toLowerCase().includes(q) ||
+        (o.brand && o.brand.toLowerCase().includes(q))
+      );
+    }
+
+    // Sort
+    if (previewSort.key) {
+      const { key, dir } = previewSort;
+      list.sort((a, b) => {
+        const valA = a[key];
+        const valB = b[key];
+
+        if (valA === undefined || valA === null) return 1 * dir;
+        if (valB === undefined || valB === null) return -1 * dir;
+
+        if (typeof valA === "number" && typeof valB === "number") {
+          return (valA - valB) * dir;
+        }
+
+        return String(valA).localeCompare(String(valB)) * dir;
+      });
+    }
+
+    return list;
+  }, [previewData, previewSearch, previewSort]);
+
+  const handleSort = (key: string) => {
+    if (!activeDatasetId) return;
+    setDatasets(prev => prev.map(d => {
+      if (d.id !== activeDatasetId) return d;
+      const dir = d.sort.key === key ? (d.sort.dir === 1 ? -1 : 1) : 1;
+      return {
+        ...d,
+        sort: { key, dir },
+        rows: [...d.rows].sort((a, b) => {
+          const valA = a[key];
+          const valB = b[key];
+
+          if (valA === undefined || valA === null) return 1 * dir;
+          if (valB === undefined || valB === null) return -1 * dir;
+
+          if (typeof valA === "number" && typeof valB === "number") {
+            return (valA - valB) * dir;
+          }
+
+          return String(valA).localeCompare(String(valB)) * dir;
+        })
+      };
+    }));
+  };
+
+  const handlePageChange = (page: number) => {
+    if (!activeDatasetId) return;
+    setDatasets(prev => prev.map(d => {
+      if (d.id !== activeDatasetId) return d;
+      return { ...d, page };
+    }));
+  };
+
+  const handleSearch = (q: string) => {
+    if (!activeDatasetId) return;
+    setDatasets(prev => prev.map(d => {
+      if (d.id !== activeDatasetId) return d;
+      return { ...d, search: q, page: 0 };
+    }));
+  };
+
+  const toggleColumnVisibility = (key: string) => {
+    if (!activeDatasetId) return;
+    setDatasets(prev => prev.map(d => {
+      if (d.id !== activeDatasetId) return d;
+      return {
+        ...d,
+        columns: d.columns.map(c => c.key === key ? { ...c, visible: !c.visible } : c)
+      };
+    }));
+  };
+
+  const handleConfirmImport = handleAutoProcessAndSubmit;
+
+  const _unusedRefs = [
+    hasShopeeIncome,
+    hasLazadaIncome,
+    hasTiktokIncome,
+    hasFacebookIncome,
+    hasLineIncome,
+    setPreviewPageSize
+  ];
+  void _unusedRefs;
+
+  return (
+    <div className={`w-full ${isDarkMode ? "dark" : ""}`}>
+      <div className="bg-white dark:bg-[#1a1a1a] rounded-2xl border border-black/5 dark:border-white/10 shadow-sm overflow-hidden flex flex-col min-h-[80vh] transition-colors duration-200">
+        
+        {/* Tab Selector */}
+        {allowedTypes.length > 1 && (
+          <div className="flex bg-apple-tertiary/30 dark:bg-apple-tertiary/20 p-1.5 rounded-2xl gap-2 border border-apple-primary/5 max-w-md mx-6 mt-6">
+            {allowedTypes.includes("orders") && (
+              <button
+                type="button"
+                onClick={() => {
+                  setImportType("orders");
+                  setErrorMsg(null);
+                }}
+                className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-black transition-all duration-300 hover-scale-card cursor-pointer border ${
+                  importType === "orders"
+                    ? "bg-blue-500 text-white border-transparent shadow-md shadow-blue-500/10"
+                    : "bg-transparent border-transparent text-apple-secondary hover:text-apple-primary hover:bg-apple-tertiary/50 dark:hover:bg-apple-tertiary/30"
+                }`}
+              >
+                คำสั่งซื้อ (Sales Orders)
+              </button>
+            )}
+            {allowedTypes.includes("products") && (
+              <button
+                type="button"
+                onClick={() => {
+                  setImportType("products");
+                  setErrorMsg(null);
+                }}
+                className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-black transition-all duration-300 hover-scale-card cursor-pointer border ${
+                  importType === "products"
+                    ? "bg-blue-500 text-white border-transparent shadow-md shadow-blue-500/10"
+                    : "bg-transparent border-transparent text-apple-secondary hover:text-apple-primary hover:bg-apple-tertiary/50 dark:hover:bg-apple-tertiary/30"
+                }`}
+              >
+                รายการสินค้า
+              </button>
+            )}
+          </div>
+        )}
+
+        <div className="p-6 flex-1">
+          {importType === "orders" ? (
+            uploadedFiles.length > 0 ? (
+              <div className="space-y-6 animate-fade-in">
+                {/* Queue Header */}
+                <div className="flex justify-between items-center border-b border-apple-primary/10 pb-4">
+                  <div>
+                    <h3 className="text-sm font-black text-apple-primary">
+                      รายการอัปโหลด ({uploadedFiles.length} ไฟล์)
+                    </h3>
+                    <p className="text-xs text-apple-secondary mt-0.5">ระบบพร้อมนำเข้าอัตโนมัติ</p>
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={handleReset}
+                    className="text-xs font-bold text-rose-500 hover:text-rose-600 transition-colors cursor-pointer bg-transparent border-none p-0 flex items-center gap-1"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> ล้างการอัปโหลด
+                  </button>
+                </div>
+
+                {/* Files List */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {uploadedFiles.map((file) => {
+                    const pf = PLATFORMS[file.platform] || PLATFORMS.unknown;
+                    return (
+                      <div 
+                        key={file.id} 
+                        className="p-4 rounded-2xl border bg-apple-secondary border-apple-primary relative overflow-hidden flex flex-col justify-between"
+                      >
+                        <div className="absolute left-0 top-0 bottom-0 w-1" style={{ backgroundColor: pf.color }} />
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <span 
+                              className="capsule-badge text-[9px] font-black" 
+                              style={{ 
+                                  backgroundColor: `${pf.color}15`, 
+                                  color: pf.color,
+                                  borderColor: `${pf.color}30`
+                                }}
+                            >
+                              {pf.label}
+                            </span>
+                            <p className="text-xs font-bold text-apple-primary truncate mt-1.5" title={file.fileName}>
+                              {file.fileName}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteFile(file.fileName)}
+                            className="text-rose-500 hover:text-rose-600 p-1 hover:bg-rose-500/10 rounded transition-all cursor-pointer flex items-center justify-center border-none bg-transparent shrink-0"
+                            title="ลบ"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                        
+                        <div className="mt-4 pt-3 border-t border-apple-primary/10 flex justify-between items-center text-[10px] text-apple-secondary font-bold">
+                          <span>ประเภท: คำสั่งซื้อ</span>
+                          <span>{file.rows.length} รายการ</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Actions & Inventory Toggle */}
+                <div className="glass-card rounded-2xl p-5 border border-apple-primary flex flex-col sm:flex-row items-center justify-between gap-4">
+                  <label className="flex items-center gap-3 cursor-pointer select-none">
+                    <input 
+                      type="checkbox" 
+                      checked={updateProductInventory}
+                      onChange={(e) => setUpdateProductInventory(e.target.checked)}
+                      className="rounded accent-blue-500 h-4.5 w-4.5 cursor-pointer"
+                    />
+                    <div>
+                      <span className="text-xs font-bold text-apple-primary block">อัปเดตจำนวนสินค้าคงคลังโดยอัตโนมัติ</span>
+                      <span className="text-[10px] text-apple-secondary block">ตัดสต็อกสินค้าในคลังสินค้าทันทีเมื่อนำเข้าข้อมูลออเดอร์สำเร็จ</span>
+                    </div>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleConfirmImport}
+                    className="w-full sm:w-auto px-6 py-3 rounded-xl text-xs font-black text-white bg-blue-500 hover:bg-blue-600 shadow-md shadow-blue-500/10 cursor-pointer flex items-center justify-center gap-2 min-h-[44px] transition-all hover:scale-[1.01]"
+                  >
+                    <Check className="h-4 w-4" /> นำเข้าข้อมูลคำสั่งซื้อ
+                  </button>
+                </div>
+
+                {/* Compact Dropzone to add more files */}
+                <div className="pt-2">
+                  <div
+                    onDragEnter={handleDrag}
+                    onDragOver={handleDrag}
+                    onDragLeave={handleDrag}
+                    onDrop={handleDrop}
+                    onClick={() => document.getElementById("csv-file-input")?.click()}
+                    className="glass-card rounded-3xl border-2 border-dashed border-apple-primary/20 hover:border-apple-primary/40 transition-all duration-300 relative overflow-hidden flex flex-col items-center justify-center gap-2 w-full p-6 text-center cursor-pointer"
+                  >
+                    <Upload className="h-5 w-5 text-apple-secondary" />
+                    <span className="text-xs font-bold text-apple-primary">ลากไฟล์มาวางที่นี่ หรือคลิกเพื่อเลือกไฟล์</span>
+                  </div>
+                </div>
+
+                <input
+                  id="csv-file-input"
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  className="hidden"
+                  onChange={handleFileChange}
+                  multiple
+                />
+
+                {datasets.length > 0 && (
+                  <div className="space-y-4 pt-6 border-t border-apple-primary/10">
+                    
+                    {/* Amber Warning Summary Alert */}
+                    <div className="bg-amber-500/10 dark:bg-amber-500/5 border border-amber-500/20 dark:border-amber-500/10 rounded-2xl p-4 flex items-start gap-3 mt-2 mb-4 animate-fade-in">
+                      <AlertTriangle className="h-5 w-5 text-amber-500 shrink-0 mt-0.5 animate-pulse" />
+                      <div>
+                        <p className="text-xs font-black text-amber-600 dark:text-amber-400">
+                          พบข้อมูลทั้งหมด {previewData.length} รายการ กรุณาตรวจสอบความถูกต้องก่อนยืนยัน
+                        </p>
+                        <p className="text-[10px] text-amber-500/80 mt-0.5">
+                          ข้อมูลนี้ถูกแสดงผลในโหมดพรีวิว (Local State) เท่านั้น จะยังไม่มีการบันทึกลงฐานข้อมูลหลัก (localStorage) หรืออัปเดตระบบจนกว่าคุณจะกดยืนยันปุ่มด้านบน
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* View Mode Toggle Header */}
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-apple-primary/10 pb-3">
+                      <div>
+                        <h4 className="text-xs font-black text-apple-primary uppercase tracking-wider">ตรวจสอบและยืนยันข้อมูล</h4>
+                        <p className="text-[10px] text-apple-secondary mt-0.5">วิเคราะห์โครงสร้างออเดอร์ของระบบล่วงหน้าก่อนยืนยันนำเข้า</p>
+                      </div>
+
+                      <div className="flex bg-apple-tertiary/40 p-1 rounded-xl gap-1 border border-apple-primary/5 shadow-inner">
+                        <button
+                          key="parsed-tab"
+                          type="button"
+                          onClick={() => setPreviewViewMode("parsed")}
+                          className={`px-3 py-1.5 rounded-lg text-[10px] font-black transition-all cursor-pointer ${
+                            previewViewMode === "parsed"
+                              ? "bg-apple-primary text-apple-secondary shadow-sm"
+                              : "text-apple-secondary hover:text-apple-primary bg-transparent"
+                          }`}
+                        >
+                          คำสั่งซื้อพร้อมนำเข้า ({previewData.length})
+                        </button>
+                        <button
+                          key="raw-tab"
+                          type="button"
+                          onClick={() => setPreviewViewMode("raw")}
+                          className={`px-3 py-1.5 rounded-lg text-[10px] font-black transition-all cursor-pointer ${
+                            previewViewMode === "raw"
+                              ? "bg-apple-primary text-apple-secondary shadow-sm"
+                              : "text-apple-secondary hover:text-apple-primary bg-transparent"
+                          }`}
+                        >
+                          โครงสร้างไฟล์ดิบ ({datasets.length} ชีต)
+                        </button>
+                      </div>
+                    </div>
+
+                    {previewViewMode === "parsed" ? (
+                      <div className="border border-apple-primary/10 rounded-2xl overflow-hidden bg-apple-secondary flex flex-col flex-1">
+                        <div className="p-4 border-b border-apple-primary/10 flex flex-col sm:flex-row gap-3 justify-between items-center bg-apple-tertiary/20">
+                          <div className="relative w-full sm:w-64">
+                            <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-apple-secondary" />
+                            <input
+                              type="text"
+                              placeholder="ค้นหาคำสั่งซื้อ (ID, ชื่อลูกค้า, สินค้า...)"
+                              value={previewSearch}
+                              onChange={(e) => {
+                                setPreviewSearch(e.target.value);
+                                setPreviewPage(0);
+                              }}
+                              className="w-full bg-apple-secondary border border-apple-primary/10 rounded-xl py-1.5 pl-9 pr-4 text-xs text-apple-primary placeholder-apple-secondary focus:outline-none focus:border-apple-primary/30"
+                            />
+                          </div>
+                          
+                          <div className="text-[10px] text-apple-secondary font-bold">
+                            พบข้อมูลที่ตรงเงื่อนไข {filteredAndSortedPreview.length} จาก {previewData.length} รายการ
+                          </div>
+                        </div>
+
+                        <div className="overflow-x-auto overflow-y-auto max-h-[350px]">
+                          <table className="w-full text-left border-collapse text-[11px]">
+                            <thead>
+                              <tr className="border-b border-apple-primary/10 bg-apple-tertiary/10">
+                                <th className="px-3 py-2.5 text-neutral-400 font-bold text-[10px] uppercase text-center w-10">#</th>
+                                {[
+                                  { key: "id", label: "รหัสคำสั่งซื้อ" },
+                                  { key: "date", label: "วันที่" },
+                                  { key: "channel", label: "ช่องทาง" },
+                                  { key: "brand", label: "แบรนด์" },
+                                  { key: "customerName", label: "ชื่อลูกค้า" },
+                                  { key: "productName", label: "ชื่อสินค้า" },
+                                  { key: "quantity", label: "จำนวน", isNum: true },
+                                  { key: "total", label: "ยอดขายรวม", isNum: true },
+                                  { key: "platformFee", label: "ค่าธรรมเนียม", isNum: true },
+                                  { key: "shippingFee", label: "ค่าส่ง", isNum: true },
+                                  { key: "netIncome", label: "รายรับสุทธิ", isNum: true }
+                                ].map((col) => {
+                                  const isSorted = previewSort.key === col.key;
+                                  return (
+                                    <th
+                                      key={col.key}
+                                      onClick={() => {
+                                        setPreviewSort(prev => ({
+                                          key: col.key as keyof Order,
+                                          dir: prev.key === col.key ? (prev.dir === 1 ? -1 : 1) : 1
+                                        }));
+                                      }}
+                                      className={`px-3 py-2.5 font-bold text-[10px] uppercase text-apple-secondary cursor-pointer hover:bg-apple-primary/5 select-none ${col.isNum ? "text-right" : ""}`}
+                                    >
+                                      <div className={`flex items-center gap-1 ${col.isNum ? "justify-end" : ""}`}>
+                                        <span>{col.label}</span>
+                                        {isSorted && (
+                                          <span className="text-[8px]">{previewSort.dir === 1 ? "▲" : "▼"}</span>
+                                        )}
+                                      </div>
+                                    </th>
+                                  );
+                                })}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {filteredAndSortedPreview.slice(previewPage * previewPageSize, (previewPage + 1) * previewPageSize).map((order, index) => {
+                                const rIdx = previewPage * previewPageSize + index + 1;
+                                return (
+                                  <tr
+                                    key={order.id}
+                                    className="hover:bg-apple-tertiary/30 border-b border-apple-primary/5 transition-colors"
+                                  >
+                                    <td className="px-3 py-2 text-center text-apple-secondary font-mono">{rIdx}</td>
+                                    <td className="px-3 py-2 font-mono font-bold text-apple-primary truncate max-w-[120px]">{order.id}</td>
+                                    <td className="px-3 py-2 text-apple-secondary whitespace-nowrap">{order.date}</td>
+                                    <td className="px-3 py-2 whitespace-nowrap">
+                                      <span 
+                                        className="text-[9px] font-bold px-1.5 py-0.5 rounded-md border"
+                                        style={{
+                                          backgroundColor: `${PLATFORMS[order.channel === "TikTok Shop" ? "tiktok" : order.channel === "Lazada" ? "lazada" : order.channel === "Shopee" ? "shopee" : order.channel === "Facebook" ? "facebook" : order.channel === "LINE OA" ? "line" : "unknown"]?.color || "#7A8699"}15`,
+                                          color: PLATFORMS[order.channel === "TikTok Shop" ? "tiktok" : order.channel === "Lazada" ? "lazada" : order.channel === "Shopee" ? "shopee" : order.channel === "Facebook" ? "facebook" : order.channel === "LINE OA" ? "line" : "unknown"]?.color || "#7A8699",
+                                          borderColor: `${PLATFORMS[order.channel === "TikTok Shop" ? "tiktok" : order.channel === "Lazada" ? "lazada" : order.channel === "Shopee" ? "shopee" : order.channel === "Facebook" ? "facebook" : order.channel === "LINE OA" ? "line" : "unknown"]?.color || "#7A8699"}30`
+                                        }}
+                                      >
+                                        {order.channel}
+                                      </span>
+                                    </td>
+                                    <td className="px-3 py-2 text-apple-secondary truncate max-w-[100px]">{order.brand}</td>
+                                    <td className="px-3 py-2 text-apple-primary font-bold truncate max-w-[120px]">{order.customerName}</td>
+                                    <td className="px-3 py-2 text-apple-primary truncate max-w-[180px]" title={order.productName}>{order.productName}</td>
+                                    <td className="px-3 py-2 text-right font-mono text-apple-primary">{order.quantity}</td>
+                                    <td className="px-3 py-2 text-right font-mono font-bold text-apple-primary">{order.total.toLocaleString("th-TH", { minimumFractionDigits: 2 })}</td>
+                                    <td className="px-3 py-2 text-right font-mono text-rose-500/80">-{order.platformFee.toLocaleString("th-TH", { minimumFractionDigits: 2 })}</td>
+                                    <td className="px-3 py-2 text-right font-mono text-amber-500/80">-{order.shippingFee.toLocaleString("th-TH", { minimumFractionDigits: 2 })}</td>
+                                    <td className={`px-3 py-2 text-right font-mono font-bold ${order.netIncome >= 0 ? "text-emerald-500" : "text-rose-500"}`}>
+                                      {order.netIncome.toLocaleString("th-TH", { minimumFractionDigits: 2 })}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                              {filteredAndSortedPreview.length === 0 && (
+                                <tr>
+                                  <td colSpan={12} className="px-4 py-8 text-center text-apple-secondary font-bold italic">
+                                    ไม่พบข้อมูลที่ตรงกับตัวค้นหา
+                                  </td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        {filteredAndSortedPreview.length > previewPageSize && (
+                          <div className="p-4 border-t border-apple-primary/10 bg-apple-tertiary/10 flex justify-between items-center text-[10px] font-bold text-apple-secondary">
+                            <span>แสดง {previewPage * previewPageSize + 1} - {Math.min((previewPage + 1) * previewPageSize, filteredAndSortedPreview.length)} จาก {filteredAndSortedPreview.length} รายการ</span>
+                            <div className="flex gap-1">
+                              <button
+                                type="button"
+                                disabled={previewPage === 0}
+                                onClick={() => setPreviewPage(prev => Math.max(0, prev - 1))}
+                                className="px-2 py-1 rounded bg-apple-secondary border border-apple-primary/10 hover:bg-apple-tertiary disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                              >
+                                ย้อนกลับ
+                              </button>
+                              <button
+                                type="button"
+                                disabled={(previewPage + 1) * previewPageSize >= filteredAndSortedPreview.length}
+                                onClick={() => setPreviewPage(prev => prev + 1)}
+                                className="px-2 py-1 rounded bg-apple-secondary border border-apple-primary/10 hover:bg-apple-tertiary disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                              >
+                                ถัดไป
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        <div className="flex gap-2 overflow-x-auto pb-1.5 scrollbar-thin">
+                          {datasets.map((d) => {
+                            const pf = PLATFORMS[d.platform] || PLATFORMS.unknown;
+                            const isActive = d.id === activeDatasetId;
+                            return (
+                              <button
+                                key={d.id}
+                                type="button"
+                                onClick={() => setActiveDatasetId(d.id)}
+                                className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
+                                  isActive
+                                    ? "bg-apple-primary text-apple-secondary border-transparent"
+                                    : "bg-apple-secondary border-apple-primary/10 text-apple-secondary hover:bg-apple-tertiary"
+                                }`}
+                              >
+                                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: pf.color }} />
+                                <span>{d.fileName} ({d.sheetName})</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {activeDataset && (
+                          <div className="border border-apple-primary/10 rounded-2xl overflow-hidden bg-apple-secondary flex flex-col flex-1">
+                            <div className="p-4 border-b border-apple-primary/10 flex flex-col sm:flex-row gap-3 justify-between items-center bg-apple-tertiary/20">
+                              <div className="relative w-full sm:w-64">
+                                <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-apple-secondary" />
+                                <input
+                                  ref={searchInputRef}
+                                  type="text"
+                                  placeholder="ค้นหาข้อมูล..."
+                                  value={activeDataset.search || ""}
+                                  onChange={(e) => handleSearchChange(e.target.value)}
+                                  className="w-full bg-apple-secondary border border-apple-primary/10 rounded-xl py-1.5 pl-9 pr-4 text-xs text-apple-primary placeholder-apple-secondary focus:outline-none focus:border-apple-primary/30"
+                                />
+                              </div>
+                              
+                              <div className="relative">
+                                <button
+                                  type="button"
+                                  onClick={() => setIsColMenuOpen(!isColMenuOpen)}
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-apple-primary/10 text-xs font-bold text-apple-primary bg-apple-secondary hover:bg-apple-tertiary cursor-pointer"
+                                >
+                                  <span>เลือกคอลัมน์</span>
+                                  <ChevronDown className="h-3.5 w-3.5" />
+                                </button>
+                                {isColMenuOpen && (
+                                  <>
+                                    <div className="fixed inset-0 z-10" onClick={() => setIsColMenuOpen(false)} />
+                                    <div className="absolute right-0 mt-1.5 w-48 rounded-xl border border-apple-primary/10 bg-white dark:bg-[#222] shadow-lg z-20 max-h-60 overflow-y-auto p-1 animate-scale-in">
+                                      {activeDataset.columns.map((c) => (
+                                        <label key={c.key} className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-apple-tertiary cursor-pointer text-xs font-bold text-apple-primary">
+                                          <input
+                                            type="checkbox"
+                                            checked={c.visible}
+                                            onChange={() => toggleColumnVisibility(c.key)}
+                                            className="rounded accent-blue-500"
+                                          />
+                                          <span>{c.label}</span>
+                                        </label>
+                                      ))}
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="overflow-x-auto overflow-y-auto max-h-[300px]">
+                              <table className="w-full text-left border-collapse text-xs">
+                                <thead>
+                                  <tr className="border-b border-apple-primary/10 bg-apple-tertiary/10">
+                                    <th className="px-4 py-2 text-neutral-400 font-bold text-[10px] uppercase text-center w-12">#</th>
+                                    {activeDataset.columns.filter(c => c.visible).map((col) => {
+                                      const isSorted = activeDataset.sort.key === col.key;
+                                      return (
+                                        <th
+                                          key={col.key}
+                                          onClick={() => handleSort(col.key)}
+                                          className={`px-4 py-2 font-bold text-[10px] uppercase text-apple-secondary cursor-pointer hover:bg-apple-primary/5 select-none ${col.isNum ? "text-right" : ""}`}
+                                        >
+                                          <div className={`flex items-center gap-1 ${col.isNum ? "justify-end" : ""}`}>
+                                            <span>{col.label}</span>
+                                            {isSorted && (
+                                              <span className="text-[8px]">{activeDataset.sort.dir === 1 ? "▲" : "▼"}</span>
+                                            )}
+                                          </div>
+                                        </th>
+                                      );
+                                    })}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {filteredRows.slice(activeDataset.page * activeDataset.pageSize, (activeDataset.page + 1) * activeDataset.pageSize).map((row, rIdx) => (
+                                    <tr
+                                      key={rIdx}
+                                      onClick={() => {
+                                        setSelectedRow(row);
+                                        setSelectedRowIdx(activeDataset.page * activeDataset.pageSize + rIdx + 1);
+                                      }}
+                                      className="hover:bg-apple-tertiary/30 border-b border-apple-primary/5 transition-colors cursor-pointer"
+                                    >
+                                      <td className="px-4 py-2 text-center text-apple-secondary font-mono">
+                                        {activeDataset.page * activeDataset.pageSize + rIdx + 1}
+                                      </td>
+                                      {activeDataset.columns.filter(c => c.visible).map((col) => {
+                                        const val = row[col.key];
+                                        const f = fmtCell(val, col);
+                                        return (
+                                          <td key={col.key} className={`px-4 py-2 truncate max-w-[200px] text-apple-primary ${f.cls}`}>
+                                            {f.text}
+                                          </td>
+                                        );
+                                      })}
+                                    </tr>
+                                  ))}
+                                  {filteredRows.length === 0 && (
+                                    <tr>
+                                      <td colSpan={activeDataset.columns.filter(c => c.visible).length + 1} className="px-4 py-8 text-center text-apple-secondary font-bold italic">
+                                        ไม่พบข้อมูลที่ตรงกับตัวค้นหา
+                                      </td>
+                                    </tr>
+                                  )}
+                                </tbody>
+                              </table>
+                            </div>
+
+                            {filteredRows.length > activeDataset.pageSize && (
+                              <div className="p-4 border-t border-apple-primary/10 bg-apple-tertiary/10 flex justify-between items-center text-[10px] font-bold text-apple-secondary">
+                                <span>แสดง {activeDataset.page * activeDataset.pageSize + 1} - {Math.min((activeDataset.page + 1) * activeDataset.pageSize, filteredRows.length)} จาก {filteredRows.length} รายการ</span>
+                                <div className="flex gap-1">
+                                  <button
+                                    type="button"
+                                    disabled={activeDataset.page === 0}
+                                    onClick={() => handlePageChange(activeDataset.page - 1)}
+                                    className="px-2 py-1 rounded bg-apple-secondary border border-apple-primary/10 hover:bg-apple-tertiary disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                                  >
+                                    ย้อนกลับ
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={(activeDataset.page + 1) * activeDataset.pageSize >= filteredRows.length}
+                                    onClick={() => handlePageChange(activeDataset.page + 1)}
+                                    className="px-2 py-1 rounded bg-apple-secondary border border-apple-primary/10 hover:bg-apple-tertiary disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                                  >
+                                    ถัดไป
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}��สอบโครงสร้างข้อมูล</p>
+                    </div>
+
+                    <div className="flex gap-2 overflow-x-auto pb-1.5 scrollbar-thin">
+                      {datasets.map((d) => {
+                        const pf = PLATFORMS[d.platform] || PLATFORMS.unknown;
+                        const isActive = d.id === activeDatasetId;
+                        return (
+                          <button
+                            key={d.id}
+                            type="button"
+                            onClick={() => setActiveDatasetId(d.id)}
+                            className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
+                              isActive
+                                ? "bg-apple-primary text-apple-secondary border-transparent"
+                                : "bg-apple-secondary border-apple-primary/10 text-apple-secondary hover:bg-apple-tertiary"
+                            }`}
+                          >
+                            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: pf.color }} />
+                            <span>{d.fileName} ({d.sheetName})</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {activeDataset && (
+                      <div className="border border-apple-primary/10 rounded-2xl overflow-hidden bg-apple-secondary flex flex-col flex-1">
+                        <div className="p-4 border-b border-apple-primary/10 flex flex-col sm:flex-row gap-3 justify-between items-center bg-apple-tertiary/20">
+                          <div className="relative w-full sm:w-64">
+                            <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-apple-secondary" />
+                            <input
+                              ref={searchInputRef}
+                              type="text"
+                              placeholder="ค้นหาข้อมูล..."
+                              value={activeDataset.search || ""}
+                              onChange={(e) => handleSearchChange(e.target.value)}
+                              className="w-full bg-apple-secondary border border-apple-primary/10 rounded-xl py-1.5 pl-9 pr-4 text-xs text-apple-primary placeholder-apple-secondary focus:outline-none focus:border-apple-primary/30"
+                            />
+                          </div>
+                          
+                          <div className="relative">
+                            <button
+                              type="button"
+                              onClick={() => setIsColMenuOpen(!isColMenuOpen)}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-apple-primary/10 text-xs font-bold text-apple-primary bg-apple-secondary hover:bg-apple-tertiary cursor-pointer"
+                            >
+                              <span>เลือกคอลัมน์</span>
+                              <ChevronDown className="h-3.5 w-3.5" />
+                            </button>
+                            {isColMenuOpen && (
+                              <>
+                                <div className="fixed inset-0 z-10" onClick={() => setIsColMenuOpen(false)} />
+                                <div className="absolute right-0 mt-1.5 w-48 rounded-xl border border-apple-primary/10 bg-white dark:bg-[#222] shadow-lg z-20 max-h-60 overflow-y-auto p-1 animate-scale-in">
+                                  {activeDataset.columns.map((c) => (
+                                    <label key={c.key} className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-apple-tertiary cursor-pointer text-xs font-bold text-apple-primary">
+                                      <input
+                                        type="checkbox"
+                                        checked={c.visible}
+                                        onChange={() => toggleColumnVisibility(c.key)}
+                                        className="rounded accent-blue-500"
+                                      />
+                                      <span>{c.label}</span>
+                                    </label>
+                                  ))}
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="overflow-x-auto overflow-y-auto max-h-[300px]">
+                          <table className="w-full text-left border-collapse text-xs">
+                            <thead>
+                              <tr className="border-b border-apple-primary/10 bg-apple-tertiary/10">
+                                <th className="px-4 py-2 text-neutral-400 font-bold text-[10px] uppercase text-center w-12">#</th>
+                                {activeDataset.columns.filter(c => c.visible).map((col) => {
+                                  const isSorted = activeDataset.sort.key === col.key;
+                                  return (
+                                    <th
+                                      key={col.key}
+                                      onClick={() => handleSort(col.key)}
+                                      className={`px-4 py-2 font-bold text-[10px] uppercase text-apple-secondary cursor-pointer hover:bg-apple-primary/5 select-none ${col.isNum ? "text-right" : ""}`}
+                                    >
+                                      <div className={`flex items-center gap-1 ${col.isNum ? "justify-end" : ""}`}>
+                                        <span>{col.label}</span>
+                                        {isSorted && (
+                                          <span className="text-[8px]">{activeDataset.sort.dir === 1 ? "▲" : "▼"}</span>
+                                        )}
+                                      </div>
+                                    </th>
+                                  );
+                                })}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {filteredRows.slice(activeDataset.page * activeDataset.pageSize, (activeDataset.page + 1) * activeDataset.pageSize).map((row, rIdx) => (
+                                <tr
+                                  key={rIdx}
+                                  onClick={() => {
+                                    setSelectedRow(row);
+                                    setSelectedRowIdx(activeDataset.page * activeDataset.pageSize + rIdx + 1);
+                                  }}
+                                  className="hover:bg-apple-tertiary/30 border-b border-apple-primary/5 transition-colors cursor-pointer"
+                                >
+                                  <td className="px-4 py-2 text-center text-apple-secondary font-mono">
+                                    {activeDataset.page * activeDataset.pageSize + rIdx + 1}
+                                  </td>
+                                  {activeDataset.columns.filter(c => c.visible).map((col) => {
+                                    const val = row[col.key];
+                                    const f = fmtCell(val, col);
+                                    return (
+                                      <td key={col.key} className={`px-4 py-2 truncate max-w-[200px] text-apple-primary ${f.cls}`}>
+                                        {f.text}
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                              {filteredRows.length === 0 && (
+                                <tr>
+                                  <td colSpan={activeDataset.columns.filter(c => c.visible).length + 1} className="px-4 py-8 text-center text-apple-secondary font-bold italic">
+                                    ไม่พบข้อมูลที่ตรงกับตัวค้นหา
+                                  </td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        {filteredRows.length > activeDataset.pageSize && (
+                          <div className="p-4 border-t border-apple-primary/10 bg-apple-tertiary/10 flex justify-between items-center text-[10px] font-bold text-apple-secondary">
+                            <span>แสดง {activeDataset.page * activeDataset.pageSize + 1} - {Math.min((activeDataset.page + 1) * activeDataset.pageSize, filteredRows.length)} จาก {filteredRows.length} รายการ</span>
+                            <div className="flex gap-1">
+                              <button
+                                type="button"
+                                disabled={activeDataset.page === 0}
+                                onClick={() => handlePageChange(activeDataset.page - 1)}
+                                className="px-2 py-1 rounded bg-apple-secondary border border-apple-primary/10 hover:bg-apple-tertiary disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                              >
+                                ย้อนกลับ
+                              </button>
+                              <button
+                                type="button"
+                                disabled={(activeDataset.page + 1) * activeDataset.pageSize >= filteredRows.length}
+                                onClick={() => handlePageChange(activeDataset.page + 1)}
+                                className="px-2 py-1 rounded bg-apple-secondary border border-apple-primary/10 hover:bg-apple-tertiary disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                              >
+                                ถัดไป
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              /* Initial Screen Dropzone */
+              <div className="flex-1 flex flex-col items-center justify-center min-h-[60vh] space-y-6">
+                {/* Platform Selector Tabs */}
+                <div className="flex bg-apple-tertiary/40 p-1.5 rounded-2xl gap-2 border border-apple-primary/5 max-w-2xl w-full shadow-inner overflow-x-auto">
+                  {(["all", "lazada", "shopee", "tiktok", "facebook", "line"] as const).map((platform) => {
+                    const isActive = uploadPlatform === platform;
+                    let label = "";
+                    let activeStyle = "";
+                    let colorDot = null;
+                    
+                    if (platform === "all") {
+                      label = "ตรวจหาอัตโนมัติ (Auto)";
+                      activeStyle = isActive 
+                        ? (isDarkMode 
+                            ? "bg-gradient-to-r from-blue-500/10 to-indigo-500/15 border-blue-500/30 text-blue-400 shadow-md shadow-blue-500/5" 
+                            : "bg-gradient-to-r from-blue-50 to-indigo-50/50 border-blue-500/20 text-blue-600 shadow-sm") 
+                        : "";
+                      colorDot = <span className={`w-2 h-2 rounded-full bg-gradient-to-r from-blue-500 to-indigo-500 shrink-0 ${isActive ? "scale-110" : ""}`} />;
+                    } else if (platform === "lazada") {
+                      label = "Lazada";
+                      activeStyle = isActive ? "bg-[#2E2BB8]/10 border-[#2E2BB8]/20 text-[#2E2BB8] shadow-sm" : "";
+                      colorDot = <span className={`w-2 h-2 rounded-full bg-[#2E2BB8] shrink-0 ${isActive ? "scale-110" : ""}`} />;
+                    } else if (platform === "shopee") {
+                      label = "Shopee";
+                      activeStyle = isActive ? "bg-[#EE4D2D]/10 border-[#EE4D2D]/20 text-[#EE4D2D] shadow-sm" : "";
+                      colorDot = <span className={`w-2 h-2 rounded-full bg-[#EE4D2D] shrink-0 ${isActive ? "scale-110" : ""}`} />;
+                    } else if (platform === "tiktok") {
+                      label = "TikTok Shop";
+                      activeStyle = isActive ? "bg-[#FE2C55]/10 border-[#FE2C55]/20 text-[#FE2C55] shadow-sm" : "";
+                      colorDot = <span className={`w-2 h-2 rounded-full bg-[#FE2C55] shrink-0 ${isActive ? "scale-110" : ""}`} />;
+                    } else if (platform === "facebook") {
+                      label = "Facebook";
+                      activeStyle = isActive ? "bg-[#1877F2]/10 border-[#1877F2]/20 text-[#1877F2] shadow-sm" : "";
+                      colorDot = <span className={`w-2 h-2 rounded-full bg-[#1877F2] shrink-0 ${isActive ? "scale-110" : ""}`} />;
+                    } else if (platform === "line") {
+                      label = "LINE OA";
+                      activeStyle = isActive ? "bg-[#06C755]/10 border-[#06C755]/20 text-[#06C755] shadow-sm" : "";
+                      colorDot = <span className={`w-2 h-2 rounded-full bg-[#06C755] shrink-0 ${isActive ? "scale-110" : ""}`} />;
+                    }
+
+                    return (
+                      <button
+                        key={platform}
+                        type="button"
+                        onClick={() => setUploadPlatform(platform)}
+                        className={`flex-1 py-2 px-3 rounded-xl text-xs font-black transition-all duration-300 flex items-center justify-center gap-1.5 cursor-pointer border shrink-0 ${
+                          isActive 
+                            ? `${activeStyle} border-solid` 
+                            : "bg-transparent border-transparent text-apple-secondary hover:text-apple-primary hover:bg-apple-tertiary/50"
+                        }`}
+                      >
+                        {colorDot}
+                        <span>{label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div
+                  onDragEnter={handleDrag}
+                  onDragOver={handleDrag}
+                  onDragLeave={handleDrag}
+                  onDrop={handleDrop}
+                  onClick={() => document.getElementById("csv-file-input")?.click()}
+                  className={`relative border-2 border-dashed rounded-3xl p-12 text-center cursor-pointer transition-all duration-300 flex flex-col items-center justify-center gap-5 max-w-2xl w-full overflow-hidden ${
+                    dragActive
+                      ? UPLOAD_THEMES[uploadPlatform].activeBorder + " scale-[1.02]"
+                      : UPLOAD_THEMES[uploadPlatform].normalBorder
+                  }`}
+                >
+                  <div className={`absolute inset-0 bg-gradient-to-b ${
+                    uploadPlatform === "all" ? "from-blue-500/[0.04] to-transparent" :
+                    uploadPlatform === "lazada" ? "from-[#2E2BB8]/[0.04] to-transparent" :
+                    uploadPlatform === "shopee" ? "from-[#EE4D2D]/[0.04] to-transparent" :
+                    uploadPlatform === "tiktok" ? "from-[#FE2C55]/[0.04] to-transparent" :
+                    uploadPlatform === "facebook" ? "from-[#1877F2]/[0.04] to-transparent" :
+                    "from-[#06C755]/[0.04] to-transparent"
+                  } pointer-events-none transition-colors duration-500`} />
+
+                  <div className={`p-4 rounded-2xl transition-all duration-300 ${
+                    dragActive ? "scale-110 rotate-3" : "hover:scale-105"
+                  } ${UPLOAD_THEMES[uploadPlatform].iconBg}`}>
+                    <Upload className={`h-7 w-7 transition-all duration-300 ${dragActive ? "animate-bounce" : ""}`} />
+                  </div>
+                  <div className="space-y-1 flex flex-col items-center">
+                    <h3 className="text-sm font-black text-apple-primary uppercase tracking-wider">
+                      {UPLOAD_THEMES[uploadPlatform].title}
+                    </h3>
+                    <p className="text-[11px] text-apple-secondary leading-relaxed max-w-md mx-auto text-center">
+                      รองรับรายงานร้านค้า Lazada, Shopee, TikTok, Facebook, LINE OA (.csv, .xlsx)
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col items-center gap-3 mt-1">
+                    <button
+                      type="button"
+                      className={`px-6 py-2.5 rounded-xl text-xs font-black shadow-md pointer-events-none transition-all duration-300 ${UPLOAD_THEMES[uploadPlatform].buttonClass}`}
+                    >
+                      เลือกไฟล์ในเครื่อง
+                    </button>
+                    
+                    <div className="flex gap-1.5 flex-wrap justify-center mt-1">
+                      {['.CSV', '.XLSX', '.XLS'].map(ext => (
+                        <span key={ext} className="text-[9px] px-2 py-0.5 rounded font-mono font-bold bg-apple-tertiary text-apple-secondary border border-apple-primary/10">
+                          {ext}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  <input
+                    id="csv-file-input"
+                    type="file"
+                    accept=".csv,.xlsx,.xls"
+                    className="hidden"
+                    onChange={handleFileChange}
+                    multiple
+                  />
+                </div>
+
+                {/* Platforms status grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 w-full pt-4">
+                  {/* Lazada Card */}
+                  <div 
+                    onClick={() => setUploadPlatform("lazada")}
+                    onDragEnter={(e) => handleCardDrag(e, "lazada")}
+                    onDragOver={(e) => handleCardDrag(e, "lazada")}
+                    onDragLeave={(e) => handleCardDrag(e, "lazada")}
+                    onDrop={(e) => handleCardDrop(e, "lazada")}
+                    className={`p-4 rounded-2xl border text-left cursor-pointer transition-all duration-300 select-none relative overflow-hidden flex flex-col justify-between min-h-[115px] ${
+                      uploadPlatform === "lazada"
+                        ? "border-[#2E2BB8] ring-2 ring-[#2E2BB8]/20 bg-[#2E2BB8]/[0.02] shadow-md shadow-[#2E2BB8]/5 scale-[1.01]"
+                        : activeCardDrag === "lazada"
+                          ? "border-[#2E2BB8] bg-[#2E2BB8]/10 scale-[1.03]"
+                          : isDarkMode 
+                            ? "bg-white/3 border-white/5 hover:border-white/20 hover:bg-white/5 hover:-translate-y-0.5" 
+                            : "bg-apple-tertiary/40 border-black/5 hover:border-black/20 hover:bg-apple-tertiary/60 hover:-translate-y-0.5"
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#2E2BB8] shadow-sm shadow-[#2E2BB8]/30" />
+                          <span className="text-xs font-black text-apple-primary">Lazada</span>
+                        </div>
+                        {uploadPlatform === "lazada" && (
+                          <span className="text-[9px] font-black text-[#2E2BB8] bg-[#2E2BB8]/10 px-1.5 py-0.5 rounded-md border border-[#2E2BB8]/10">
+                            กำลังเลือก
+                          </span>
+                        )}
+                        {activeCardDrag === "lazada" && (
+                          <span className="text-[9px] font-black text-white bg-[#2E2BB8] px-1.5 py-0.5 rounded-md animate-pulse">
+                            วางไฟล์ที่นี่
+                          </span>
+                        )}
+                      </div>
+                      
+                      <div className="space-y-1.5 mt-2">
+                        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-apple-secondary">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${hasLazadaIncome ? "bg-emerald-500 animate-pulse" : "bg-neutral-300 dark:bg-neutral-600"}`} />
+                          <span className={hasLazadaIncome ? "text-emerald-600 dark:text-emerald-400 font-bold" : ""}>
+                            รายรับ (Income Overview) {hasLazadaIncome && "✓"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-apple-secondary">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${hasLazadaOrder ? "bg-emerald-500 animate-pulse" : "bg-neutral-300 dark:bg-neutral-600"}`} />
+                          <span className={hasLazadaOrder ? "text-emerald-600 dark:text-emerald-400 font-bold" : ""}>
+                            คำสั่งซื้อ (Orders) {hasLazadaOrder && "✓"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Shopee Card */}
+                  <div 
+                    onClick={() => setUploadPlatform("shopee")}
+                    onDragEnter={(e) => handleCardDrag(e, "shopee")}
+                    onDragOver={(e) => handleCardDrag(e, "shopee")}
+                    onDragLeave={(e) => handleCardDrag(e, "shopee")}
+                    onDrop={(e) => handleCardDrop(e, "shopee")}
+                    className={`p-4 rounded-2xl border text-left cursor-pointer transition-all duration-300 select-none relative overflow-hidden flex flex-col justify-between min-h-[115px] ${
+                      uploadPlatform === "shopee"
+                        ? "border-[#EE4D2D] ring-2 ring-[#EE4D2D]/20 bg-[#EE4D2D]/[0.02] shadow-md shadow-[#EE4D2D]/5 scale-[1.01]"
+                        : activeCardDrag === "shopee"
+                          ? "border-[#EE4D2D] bg-[#EE4D2D]/10 scale-[1.03]"
+                          : isDarkMode 
+                            ? "bg-white/3 border-white/5 hover:border-white/20 hover:bg-white/5 hover:-translate-y-0.5" 
+                            : "bg-apple-tertiary/40 border-black/5 hover:border-black/20 hover:bg-apple-tertiary/60 hover:-translate-y-0.5"
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#EE4D2D] shadow-sm shadow-[#EE4D2D]/30" />
+                          <span className="text-xs font-black text-apple-primary">Shopee</span>
+                        </div>
+                        {uploadPlatform === "shopee" && (
+                          <span className="text-[9px] font-black text-[#EE4D2D] bg-[#EE4D2D]/10 px-1.5 py-0.5 rounded-md border border-[#EE4D2D]/10">
+                            กำลังเลือก
+                          </span>
+                        )}
+                        {activeCardDrag === "shopee" && (
+                          <span className="text-[9px] font-black text-white bg-[#EE4D2D] px-1.5 py-0.5 rounded-md animate-pulse">
+                            วางไฟล์ที่นี่
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="space-y-1.5 mt-2">
+                        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-apple-secondary">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${hasShopeeIncome ? "bg-emerald-500 animate-pulse" : "bg-neutral-300 dark:bg-neutral-600"}`} />
+                          <span className={hasShopeeIncome ? "text-emerald-600 dark:text-emerald-400 font-bold" : ""}>
+                            รายรับ (โอนเงินสำเร็จ) {hasShopeeIncome && "✓"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-apple-secondary">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${hasShopeeOrder ? "bg-emerald-500 animate-pulse" : "bg-neutral-300 dark:bg-neutral-600"}`} />
+                          <span className={hasShopeeOrder ? "text-emerald-600 dark:text-emerald-400 font-bold" : ""}>
+                            คำสั่งซื้อ (Orders) {hasShopeeOrder && "✓"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* TikTok Shop Card */}
+                  <div 
+                    onClick={() => setUploadPlatform("tiktok")}
+                    onDragEnter={(e) => handleCardDrag(e, "tiktok")}
+                    onDragOver={(e) => handleCardDrag(e, "tiktok")}
+                    onDragLeave={(e) => handleCardDrag(e, "tiktok")}
+                    onDrop={(e) => handleCardDrop(e, "tiktok")}
+                    className={`p-4 rounded-2xl border text-left cursor-pointer transition-all duration-300 select-none relative overflow-hidden flex flex-col justify-between min-h-[115px] ${
+                      uploadPlatform === "tiktok"
+                        ? "border-[#FE2C55] ring-2 ring-[#FE2C55]/20 bg-[#FE2C55]/[0.02] shadow-md shadow-[#FE2C55]/5 scale-[1.01]"
+                        : activeCardDrag === "tiktok"
+                          ? "border-[#FE2C55] bg-[#FE2C55]/10 scale-[1.03]"
+                          : isDarkMode 
+                            ? "bg-white/3 border-white/5 hover:border-white/20 hover:bg-white/5 hover:-translate-y-0.5" 
+                            : "bg-apple-tertiary/40 border-black/5 hover:border-black/20 hover:bg-apple-tertiary/60 hover:-translate-y-0.5"
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#FE2C55] shadow-sm shadow-[#FE2C55]/30" />
+                          <span className="text-xs font-black text-apple-primary">TikTok Shop</span>
+                        </div>
+                        {uploadPlatform === "tiktok" && (
+                          <span className="text-[9px] font-black text-[#FE2C55] bg-[#FE2C55]/10 px-1.5 py-0.5 rounded-md border border-[#FE2C55]/10">
+                            กำลังเลือก
+                          </span>
+                        )}
+                        {activeCardDrag === "tiktok" && (
+                          <span className="text-[9px] font-black text-white bg-[#FE2C55] px-1.5 py-0.5 rounded-md animate-pulse">
+                            วางไฟล์ที่นี่
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="space-y-1.5 mt-2">
+                        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-apple-secondary">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${hasTiktokIncome ? "bg-emerald-500 animate-pulse" : "bg-neutral-300 dark:bg-neutral-600"}`} />
+                          <span className={hasTiktokIncome ? "text-emerald-600 dark:text-emerald-400 font-bold" : ""}>
+                            รายรับ (รายละเอียดคำสั่งซื้อ) {hasTiktokIncome && "✓"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-apple-secondary">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${hasTiktokOrder ? "bg-emerald-500 animate-pulse" : "bg-neutral-300 dark:bg-neutral-600"}`} />
+                          <span className={hasTiktokOrder ? "text-emerald-600 dark:text-emerald-400 font-bold" : ""}>
+                            คำสั่งซื้อ (Order SKU) {hasTiktokOrder && "✓"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Facebook Card */}
+                  <div 
+                    onClick={() => setUploadPlatform("facebook")}
+                    onDragEnter={(e) => handleCardDrag(e, "facebook")}
+                    onDragOver={(e) => handleCardDrag(e, "facebook")}
+                    onDragLeave={(e) => handleCardDrag(e, "facebook")}
+                    onDrop={(e) => handleCardDrop(e, "facebook")}
+                    className={`p-4 rounded-2xl border text-left cursor-pointer transition-all duration-300 select-none relative overflow-hidden flex flex-col justify-between min-h-[115px] ${
+                      uploadPlatform === "facebook"
+                        ? "border-[#1877F2] ring-2 ring-[#1877F2]/20 bg-[#1877F2]/[0.02] shadow-md shadow-[#1877F2]/5 scale-[1.01]"
+                        : activeCardDrag === "facebook"
+                          ? "border-[#1877F2] bg-[#1877F2]/10 scale-[1.03]"
+                          : isDarkMode 
+                            ? "bg-white/3 border-white/5 hover:border-white/20 hover:bg-white/5 hover:-translate-y-0.5" 
+                            : "bg-apple-tertiary/40 border-black/5 hover:border-black/20 hover:bg-apple-tertiary/60 hover:-translate-y-0.5"
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#1877F2] shadow-sm shadow-[#1877F2]/30" />
+                          <span className="text-xs font-black text-apple-primary">Facebook</span>
+                        </div>
+                        {uploadPlatform === "facebook" && (
+                          <span className="text-[9px] font-black text-[#1877F2] bg-[#1877F2]/10 px-1.5 py-0.5 rounded-md border border-[#1877F2]/10">
+                            กำลังเลือก
+                          </span>
+                        )}
+                        {activeCardDrag === "facebook" && (
+                          <span className="text-[9px] font-black text-white bg-[#1877F2] px-1.5 py-0.5 rounded-md animate-pulse">
+                            วางไฟล์ที่นี่
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="space-y-1.5 mt-2">
+                        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-apple-secondary">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${hasFacebookIncome ? "bg-emerald-500 animate-pulse" : "bg-neutral-300 dark:bg-neutral-600"}`} />
+                          <span className={hasFacebookIncome ? "text-emerald-600 dark:text-emerald-400 font-bold" : ""}>
+                            รายรับ (Facebook) {hasFacebookIncome && "✓"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-apple-secondary">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${hasFacebookOrder ? "bg-emerald-500 animate-pulse" : "bg-neutral-300 dark:bg-neutral-600"}`} />
+                          <span className={hasFacebookOrder ? "text-emerald-600 dark:text-emerald-400 font-bold" : ""}>
+                            คำสั่งซื้อ (Orders) {hasFacebookOrder && "✓"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* LINE OA Card */}
+                  <div 
+                    onClick={() => setUploadPlatform("line")}
+                    onDragEnter={(e) => handleCardDrag(e, "line")}
+                    onDragOver={(e) => handleCardDrag(e, "line")}
+                    onDragLeave={(e) => handleCardDrag(e, "line")}
+                    onDrop={(e) => handleCardDrop(e, "line")}
+                    className={`p-4 rounded-2xl border text-left cursor-pointer transition-all duration-300 select-none relative overflow-hidden flex flex-col justify-between min-h-[115px] ${
+                      uploadPlatform === "line"
+                        ? "border-[#06C755] ring-2 ring-[#06C755]/20 bg-[#06C755]/[0.02] shadow-md shadow-[#06C755]/5 scale-[1.01]"
+                        : activeCardDrag === "line"
+                          ? "border-[#06C755] bg-[#06C755]/10 scale-[1.03]"
+                          : isDarkMode 
+                            ? "bg-white/3 border-white/5 hover:border-white/20 hover:bg-white/5 hover:-translate-y-0.5" 
+                            : "bg-apple-tertiary/40 border-black/5 hover:border-black/20 hover:bg-apple-tertiary/60 hover:-translate-y-0.5"
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#06C755] shadow-sm shadow-[#06C755]/30" />
+                          <span className="text-xs font-black text-apple-primary">LINE OA</span>
+                        </div>
+                        {uploadPlatform === "line" && (
+                          <span className="text-[9px] font-black text-[#06C755] bg-[#06C755]/10 px-1.5 py-0.5 rounded-md border border-[#06C755]/10">
+                            กำลังเลือก
+                          </span>
+                        )}
+                        {activeCardDrag === "line" && (
+                          <span className="text-[9px] font-black text-white bg-[#06C755] px-1.5 py-0.5 rounded-md animate-pulse">
+                            วางไฟล์ที่นี่
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="space-y-1.5 mt-2">
+                        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-apple-secondary">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${hasLineIncome ? "bg-emerald-500 animate-pulse" : "bg-neutral-300 dark:bg-neutral-600"}`} />
+                          <span className={hasLineIncome ? "text-emerald-600 dark:text-emerald-400 font-bold" : ""}>
+                            รายรับ (LINE OA) {hasLineIncome && "✓"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-apple-secondary">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${hasLineOrder ? "bg-emerald-500 animate-pulse" : "bg-neutral-300 dark:bg-neutral-600"}`} />
+                          <span className={hasLineOrder ? "text-emerald-600 dark:text-emerald-400 font-bold" : ""}>
+                            คำสั่งซื้อ (Orders) {hasLineOrder && "✓"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )
+          ) : (
+            /* Product Import View */
+            <div className="space-y-6 animate-fade-in">
+              <div>
+                <h3 className="text-sm font-black text-apple-primary">นำเข้าข้อมูลสินค้าคงคลัง (Import Product Catalog)</h3>
+                <p className="text-[10px] text-apple-secondary mt-1">อัปโหลดไฟล์ Excel หรือ CSV เพื่อเพิ่มสินค้าในคลังสินค้าและกำหนดสต็อกพร้อมกัน</p>
+              </div>
+
+              {!productFileName ? (
+                <div
+                  onDragEnter={handleProductDrag}
+                  onDragOver={handleProductDrag}
+                  onDragLeave={handleProductDrag}
+                  onDrop={handleProductDrop}
+                  onClick={() => document.getElementById("product-file-input")?.click()}
+                  className={`border-2 border-dashed rounded-3xl p-12 text-center cursor-pointer transition-all duration-300 flex flex-col items-center justify-center gap-4 ${
+                    productDragActive
+                      ? "border-blue-500 bg-blue-500/5 ring-4 ring-blue-500/10 shadow-[0_0_25px_rgba(59,130,246,0.25)]"
+                      : "border-apple-primary/15 hover:border-blue-500/40 bg-apple-secondary hover:shadow-[0_8px_30px_rgba(59,130,246,0.05)]"
+                  }`}
+                >
+                  <div className="p-4 rounded-2xl bg-gradient-to-br from-blue-500/15 to-indigo-500/15 text-blue-500 shadow-sm">
+                    <Upload className="h-7 w-7" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="text-sm font-black text-apple-primary">ลากไฟล์ CSV หรือ Excel มาวางที่นี่ หรือคลิกเพื่ออัปโหลด</h3>
+                    <p className="text-[10px] text-apple-secondary">คอลัมน์บังคับ: ชื่อสินค้า, ราคา (หมวดหมู่เสริม: Electronics, Apparel, Home, Beauty)</p>
+                  </div>
+                  <input
+                    id="product-file-input"
+                    type="file"
+                    accept=".csv,.xlsx,.xls"
+                    className="hidden"
+                    onChange={handleProductFileChange}
+                  />
+                </div>
+              ) : (
+                <div className="p-4 rounded-2xl border border-apple-primary/10 bg-apple-tertiary/30 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-500">
+                      <FileSpreadsheet className="h-6 w-6" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-apple-primary">{productFileName}</p>
+                      <p className="text-[10px] text-apple-secondary">พบสินค้าพร้อมนำเข้า {productValidCount} จาก {parsedProducts.length} รายการ</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleProductReset}
+                    className="text-xs font-bold text-rose-500 hover:text-rose-600 transition-colors flex items-center gap-1 cursor-pointer border-none bg-transparent"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    ลบไฟล์
+                  </button>
+                </div>
+              )}
+
+              {/* Parsed Products Table */}
+              {parsedProducts.length > 0 && (
+                <div className="space-y-2.5">
+                  <label className="block text-[10px] font-black uppercase tracking-wider text-apple-secondary">
+                    รายการสินค้าที่วิเคราะห์ได้จากไฟล์
+                  </label>
+                  <div className="border border-apple-primary/10 rounded-2xl overflow-hidden max-h-80 overflow-y-auto bg-apple-secondary">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-apple-primary/10 bg-apple-tertiary/10">
+                          <th className="px-5 py-3 font-black text-[10px] uppercase text-apple-secondary">ชื่อสินค้า</th>
+                          <th className="px-5 py-3 font-black text-[10px] uppercase text-apple-secondary">หมวดหมู่</th>
+                          <th className="px-5 py-3 font-black text-[10px] uppercase text-apple-secondary">แบรนด์</th>
+                          <th className="px-5 py-3 font-black text-[10px] uppercase text-apple-secondary text-right">ราคา</th>
+                          <th className="px-5 py-3 font-black text-[10px] uppercase text-apple-secondary text-center">คงเหลือ</th>
+                          <th className="px-5 py-3 font-black text-[10px] uppercase text-apple-secondary">สถานะตรวจสอบ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {parsedProducts.map((p, idx) => (
+                          <tr key={idx} className="hover:bg-apple-tertiary/30 border-b border-apple-primary/5 transition-colors">
+                            <td className="px-5 py-3 font-bold text-apple-primary">{p.name || <span className="text-rose-500 italic">ว่าง</span>}</td>
+                            <td className="px-5 py-3">
+                              <span className="text-[10px] px-2 py-0.5 rounded-lg border bg-apple-primary/5 border-apple-primary/10 text-apple-secondary">
+                                {p.category}
+                              </span>
+                            </td>
+                            <td className="px-5 py-3 text-apple-secondary">{p.brand}</td>
+                            <td className="px-5 py-3 text-right font-mono font-bold text-apple-primary">{p.price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                            <td className="px-5 py-3 text-center font-mono text-apple-primary">{p.stock.toLocaleString()}</td>
+                            <td className="px-5 py-3">
+                              {p.warnings ? (
+                                <span className="text-[10px] text-amber-500 font-bold flex items-center gap-1">
+                                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                  {p.warnings}
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-emerald-500 font-bold flex items-center gap-1">
+                                  <Check className="h-3.5 w-3.5 shrink-0" />
+                                  ถูกต้อง
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Template Download Option */}
+              <div className="flex justify-between items-center text-[10px] font-bold text-apple-secondary pt-2">
+                <span>*ระบบจะคัดกรองข้ามรายการสินค้าที่มีความบกพร่องหรือแจ้งเตือนโดยอัตโนมัติ</span>
+                <button
+                  type="button"
+                  onClick={downloadProductTemplate}
+                  className="flex items-center gap-1 text-blue-500 hover:underline cursor-pointer border-none bg-transparent font-black"
+                >
+                  <Download className="h-3 w-3" />
+                  ดาวน์โหลดไฟล์ตัวอย่างนำเข้าสินค้า (.csv)
+                </button>
+              </div>
+            </div>
+          )}
+
+          {errorMsg && (
+            <div className="p-4 bg-red-500/10 border border-red-500/20 text-red-500 text-xs font-bold rounded-2xl flex items-center gap-2.5 animate-fade-in mt-4">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span className="leading-relaxed">{errorMsg}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Footer actions */}
+        <div className="p-6 bg-apple-tertiary shrink-0 flex justify-between items-center border-t border-apple-primary/10">
+          {importType === "orders" ? (
+            <div />
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={handleProductReset}
+                className="btn-apple-secondary px-5 py-2.5 rounded-xl text-xs font-bold cursor-pointer"
+              >
+                ล้างข้อมูล
+              </button>
+              <button
+                type="button"
+                disabled={productValidCount === 0}
+                onClick={handleProductImportSubmit}
+                className={`px-5 py-2.5 rounded-xl text-xs font-black cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98] ${
+                  productValidCount === 0
+                    ? "bg-apple-secondary text-apple-tertiary border border-apple-primary/20 cursor-not-allowed opacity-50 font-bold"
+                    : isDarkMode
+                      ? "bg-white hover:bg-neutral-200 text-black shadow-md"
+                      : "bg-black hover:bg-neutral-800 text-white shadow-md"
+                }`}
+              >
+                ยืนยันการนำเข้าสินค้า {productValidCount} รายการ
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Detail Drawer overlay */}
+      {selectedRow && activeDataset && (
+        <>
+          <div 
+            className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-50 animate-fade-in"
+            onClick={() => { setSelectedRow(null); setSelectedRowIdx(-1); }}
+          />
+          <aside className="fixed top-0 right-0 h-full w-[460px] max-w-[90vw] bg-white dark:bg-[#1a1a1a] shadow-2xl z-50 border-l border-black/5 dark:border-white/10 flex flex-col animate-scale-in transition-colors duration-200">
+            <div className="p-4 border-b border-apple-primary/10 flex items-center justify-between">
+              <div>
+                <h3 className="text-xs font-black text-apple-primary">รายการแถวที่ {nf0.format(selectedRowIdx)}</h3>
+                <div className="flex items-center gap-2 mt-1">
+                  <span 
+                    className="capsule-badge" 
+                    style={{ 
+                      backgroundColor: `${PLATFORMS[activeDataset.platform].color}15`, 
+                      color: PLATFORMS[activeDataset.platform].color,
+                      borderColor: `${PLATFORMS[activeDataset.platform].color}30`
+                    }}
+                  >
+                    {PLATFORMS[activeDataset.platform].label}
+                  </span>
+                  <span className="text-[10px] font-bold text-apple-secondary">{TYPE_LABEL[activeDataset.kind] || activeDataset.kind} · {activeDataset.sheetName}</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => { setSelectedRow(null); setSelectedRowIdx(-1); }}
+                className="w-8 h-8 rounded-lg border border-apple-primary/25 bg-apple-tertiary hover:bg-apple-primary/10 flex items-center justify-center text-sm text-apple-primary font-black cursor-pointer"
+              >
+                ×
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto divide-y divide-apple-primary/5">
+              {activeDataset.columns.map((col) => {
+                const f = fmtCell(selectedRow[col.key], col);
+                return (
+                  <div key={col.key} className="p-4 hover:bg-apple-tertiary/10 transition-colors">
+                    <span className="text-[10px] font-bold text-apple-secondary uppercase tracking-wide block mb-1">{col.label}</span>
+                    <p className={`text-xs text-apple-primary leading-relaxed break-words whitespace-pre-wrap ${f.cls === "text-right font-mono" ? "font-mono" : ""}`}>
+                      {f.text}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </aside>
+        </>
+      )}
+    </div>
+  );
+};

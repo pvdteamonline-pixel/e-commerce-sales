@@ -1,0 +1,44 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies & Build
+node_modules
+dist
+dist-ssr
+*.local
+
+# Environment & Credentials
+.env
+.env.*
+!.env.example
+
+# Local Database & Backups
+db.json
+db.json.bak
+backups/
+scratch/
+
+# Raw Spreadsheet & Sensitive Sales Files
+*.xlsx
+*.xls
+*.csv
+
+# Test Results
+test-results/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

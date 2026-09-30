@@ -776,11 +776,20 @@ const SalesTabComponent: React.FC<SalesTabProps> = (props) => {
     if (salesSubTab === "products") {
       const pFiles = productFiles.length > 0 ? productFiles : [];
       const fromUploaded = uploadedDatasets.filter(
-        (d) => d.fileType === "product" || (d.type as string) === "product"
+        (d) =>
+          d.fileType === "product" ||
+          (d.type as string) === "product" ||
+          d.fileType === "order" ||
+          (d.type as string) === "order" ||
+          (!d.fileType && d.type !== "income" && !d.fileName.toLowerCase().includes("income") && !d.fileName.toLowerCase().includes("รายรับ") && !d.fileName.toLowerCase().includes("statement"))
       );
       const combined = [...pFiles, ...fromUploaded];
       const uniqueMap = new Map<string, UploadedDataset>();
       combined.forEach((f) => uniqueMap.set(f.id, f));
+      // Fallback: If no dedicated product/order files exist, include uploaded datasets
+      if (uniqueMap.size === 0 && uploadedDatasets.length > 0) {
+        uploadedDatasets.forEach((f) => uniqueMap.set(f.id, f));
+      }
       return Array.from(uniqueMap.values());
     }
     if (salesSubTab === "income") {

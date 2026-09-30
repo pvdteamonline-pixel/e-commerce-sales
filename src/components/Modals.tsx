@@ -3606,6 +3606,7 @@ interface AddUserModalProps {
     email: string;
     role: AppUser["role"];
     password: string;
+    tasks?: string[];
   }) => void;
   isDarkMode: boolean;
   onDirtyChange?: (isDirty: boolean) => void;
@@ -3616,6 +3617,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({
   onClose,
   currentUser,
   onSubmit,
+  isDarkMode,
   onDirtyChange,
 }) => {
   const [prevIsOpen, setPrevIsOpen] = useState(isOpen);
@@ -3623,6 +3625,30 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<AppUser["role"]>("User");
   const [password, setPassword] = useState("");
+  const [tasks, setTasks] = useState<string[]>([
+    "ดูแดชบอร์ด",
+    "ดูรายงานยอดขาย",
+    "เครื่องคำนวณส่วนต่าง",
+    "นำเข้าข้อมูล Excel",
+  ]);
+
+  const defaultTasksForRole = (r: AppUser["role"]) => {
+    if (r === "Manager") {
+      return [
+        "ดูแดชบอร์ด",
+        "ดูรายงานยอดขาย",
+        "เครื่องคำนวณส่วนต่าง",
+        "นำเข้าข้อมูล Excel",
+        "จัดการผู้ใช้งาน",
+      ];
+    }
+    return [
+      "ดูแดชบอร์ด",
+      "ดูรายงานยอดขาย",
+      "เครื่องคำนวณส่วนต่าง",
+      "นำเข้าข้อมูล Excel",
+    ];
+  };
 
   const isDirty =
     isOpen &&
@@ -3641,27 +3667,74 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({
       setEmail("");
       setRole("User");
       setPassword("");
+      setTasks(defaultTasksForRole("User"));
     }
   }
 
   if (!isOpen) return null;
 
+  const handleRoleChange = (newRole: AppUser["role"]) => {
+    setRole(newRole);
+    setTasks(defaultTasksForRole(newRole));
+  };
+
+  const toggleTask = (taskKey: string) => {
+    setTasks((prev) =>
+      prev.includes(taskKey)
+        ? prev.filter((t) => t !== taskKey)
+        : [...prev, taskKey],
+    );
+  };
+
+  const availableTaskOptions = [
+    {
+      key: "ดูแดชบอร์ด",
+      label: "ดูแดชบอร์ดภาพรวม",
+      desc: "กราฟและสถิติยอดขายรวม",
+    },
+    {
+      key: "ดูรายงานยอดขาย",
+      label: "ดูรายงานยอดขาย",
+      desc: "รายการสั่งซื้อและประวัติการขาย",
+    },
+    {
+      key: "เครื่องคำนวณส่วนต่าง",
+      label: "เครื่องคำนวณส่วนต่าง",
+      desc: "คำนวณส่วนแบ่งและต้นทุน",
+    },
+    {
+      key: "นำเข้าข้อมูล Excel",
+      label: "นำเข้าข้อมูล Excel",
+      desc: "อัปโหลดไฟล์ยอดขายและสินค้า",
+    },
+    ...(role === "Manager" || currentUser?.role === "Admin"
+      ? [
+          {
+            key: "จัดการผู้ใช้งาน",
+            label: "จัดการผู้ใช้งาน",
+            desc: "เปิด/ปิดสิทธิ์ทีมงาน",
+          },
+        ]
+      : []),
+  ];
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name || !email || !password) return;
-    onSubmit({ name, email, role, password });
+    const finalTasks = tasks.length > 0 ? tasks : defaultTasksForRole(role);
+    onSubmit({ name, email, role, password, tasks: finalTasks });
   };
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4 sm:p-6 md:p-8 lg:p-10 transition-all duration-300 animate-fade-in">
-      <div className="w-full max-w-md max-h-[85vh] my-auto flex flex-col overflow-hidden animate-scale-in rounded-3xl border border-apple-primary/15 bg-apple-secondary shadow-2xl">
+      <div className="w-full max-w-lg max-h-[90vh] my-auto flex flex-col overflow-hidden animate-scale-in rounded-3xl border border-apple-primary/15 bg-apple-secondary shadow-2xl">
         <div className="px-6 py-5 flex justify-between items-center bg-apple-tertiary shrink-0 border-b border-apple-primary/10">
           <div>
             <h3 className="font-black text-base text-apple-primary">
               เพิ่มบัญชีผู้ใช้งานใหม่
             </h3>
             <p className="text-xs text-apple-secondary mt-0.5">
-              สร้างบัญชีสำหรับเข้าใช้งานระบบสำหรับทีมงาน
+              สร้างบัญชีและกำหนดสิทธิ์การเข้าถึงข้อมูลระบบสำหรับทีมงาน
             </p>
           </div>
           <button
@@ -3673,7 +3746,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({
         </div>
         <form
           onSubmit={handleSubmit}
-          className="p-6 space-y-4 overflow-y-auto"
+          className="p-6 space-y-4.5 overflow-y-auto"
         >
           <div>
             <label className="block text-[11px] font-bold uppercase tracking-wider mb-1.5 text-apple-secondary">
@@ -3682,7 +3755,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({
             <input
               type="text"
               required
-              placeholder="เช่น นายสมควร บันเทิงใจ"
+              placeholder="เช่น สมพร ดีเลิศ"
               value={name}
               onChange={(e) => setName(e.target.value)}
               className="input-apple w-full rounded-2xl px-4 py-2.5 text-sm focus:outline-none placeholder:text-apple-secondary/40"
@@ -3710,7 +3783,7 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({
             <div className="relative">
               <select
                 value={role}
-                onChange={(e) => setRole(e.target.value as AppUser["role"])}
+                onChange={(e) => handleRoleChange(e.target.value as AppUser["role"])}
                 className="input-apple w-full rounded-2xl pl-4 pr-10 py-2.5 text-sm focus:outline-none cursor-pointer appearance-none"
               >
                 <option value="User">
@@ -3740,6 +3813,60 @@ export const AddUserModal: React.FC<AddUserModalProps> = ({
               onChange={(e) => setPassword(e.target.value)}
               className="input-apple w-full rounded-2xl px-4 py-2.5 text-sm focus:outline-none placeholder:text-apple-secondary/40"
             />
+          </div>
+
+          {/* Task Permissions Checklist */}
+          <div className="pt-2">
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-apple-secondary">
+                สิทธิ์การเข้าถึงเมนูและฟีเจอร์ ({tasks.length}/{availableTaskOptions.length})
+              </label>
+              <button
+                type="button"
+                onClick={() => setTasks(availableTaskOptions.map((o) => o.key))}
+                className="text-[10px] font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+              >
+                เลือกทั้งหมด
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 bg-black/5 dark:bg-white/5 p-3 rounded-2xl border border-apple-primary/10">
+              {availableTaskOptions.map((opt) => {
+                const isSelected = tasks.includes(opt.key);
+                return (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => toggleTask(opt.key)}
+                    className={`flex items-start gap-2.5 p-2.5 rounded-xl text-left transition-all cursor-pointer border ${
+                      isSelected
+                        ? isDarkMode
+                          ? "bg-blue-950/40 border-blue-500/40 text-white shadow-xs"
+                          : "bg-blue-50/80 border-blue-200 text-blue-950 shadow-xs"
+                        : isDarkMode
+                          ? "bg-transparent border-white/5 text-neutral-400 hover:bg-white/5"
+                          : "bg-transparent border-black/5 text-neutral-500 hover:bg-black/5"
+                    }`}
+                  >
+                    <div
+                      className={`mt-0.5 h-4 w-4 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
+                        isSelected
+                          ? "bg-blue-600 border-blue-600 text-white"
+                          : "border-neutral-400 dark:border-neutral-600 bg-transparent"
+                      }`}
+                    >
+                      {isSelected && <Check className="h-3 w-3 stroke-[3]" />}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold leading-tight">{opt.label}</p>
+                      <p className="text-[10px] text-neutral-400 dark:text-neutral-500 leading-tight mt-0.5 truncate">
+                        {opt.desc}
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <div className="pt-3 flex items-center justify-end gap-2.5 border-t border-apple-primary/10 mt-6">

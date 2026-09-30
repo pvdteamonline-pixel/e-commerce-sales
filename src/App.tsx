@@ -62,14 +62,8 @@ import type {
   AppNotification,
   TrashItem,
 } from "./types";
+import { supabase } from "./supabaseClient";
 import {
-  fetchUsersFromSupabase,
-  fetchProductsFromSupabase,
-  fetchOrdersFromSupabase,
-  fetchAuditLogsFromSupabase,
-  fetchDatasetsFromSupabase,
-  fetchNotificationsFromSupabase,
-  fetchTrashFromSupabase,
   syncOrdersToSupabase,
   syncProductsToSupabase,
   syncUserToSupabase,
@@ -78,15 +72,14 @@ import {
   deleteAllProductsFromSupabase,
   deleteOrdersByIdsFromSupabase,
   deleteAllOrdersFromSupabase,
-  addAuditLogToSupabase,
   syncDatasetToSupabase,
   deleteDatasetFromSupabase,
-  syncNotificationToSupabase,
   deleteNotificationFromSupabase,
   clearAllNotificationsFromSupabase,
-  syncTrashItemToSupabase,
   deleteTrashItemFromSupabase,
   clearTrashFromSupabase,
+  fetchFullAppStateFromSupabase,
+  syncFullAppStateToSupabase,
 } from "./services/supabaseService";
 
 interface RemoteSyncPayload {
@@ -116,26 +109,7 @@ const formatterJPY = new Intl.NumberFormat("ja-JP", { style: "currency", currenc
 const formatterTHB = new Intl.NumberFormat("th-TH", { style: "currency", currency: "THB" });
 
 export default function App() {
-  if (typeof window !== "undefined" && !localStorage.getItem("hasPurgedAllSalesData_v18")) {
-    try {
-      localStorage.removeItem("orders");
-      localStorage.removeItem("mock_supabase_orders");
-      localStorage.removeItem("income_data");
-      localStorage.removeItem("uploadedDatasets");
-      localStorage.removeItem("productFiles");
-      localStorage.removeItem("trash_bin_items");
-      localStorage.setItem("hasPurgedAllSalesData_v18", "true");
-      // Also clear Supabase datasets and orders
-      deleteAllOrdersFromSupabase().catch(() => {});
-      fetchDatasetsFromSupabase().then((ds) => {
-        if (ds && ds.length > 0) {
-          ds.forEach((d) => deleteDatasetFromSupabase(d.id).catch(() => {}));
-        }
-      }).catch(() => {});
-    } catch (e) {
-      console.warn("Failed to clear sales data in localStorage:", e);
-    }
-  }
+
 
   const [uploadedDatasets, setUploadedDatasets] = useState<UploadedDataset[]>(
     () => {
@@ -390,15 +364,39 @@ export default function App() {
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.map((u: AppUser) => {
-            const match = initialUsersList.find((iu) => iu.id === u.id);
-            return {
-              ...match,
-              ...u,
-              tasks: u.tasks || match?.tasks || []
-            };
-          });
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const mockUsernames = new Set(["somchai", "somsri", "marcus", "sophia"]);
+          const cleaned = parsed.filter(
+            (u: AppUser) =>
+              !mockUsernames.has(u.username?.toLowerCase() || "") &&
+              u.id !== "USR-002" &&
+              u.id !== "USR-003" &&
+              u.id !== "USR-004" &&
+              u.id !== "USR-005",
+          );
+          if (cleaned.length > 0) {
+            return cleaned.map((u: AppUser) => {
+              const defaultTasks =
+                u.role === "Manager"
+                  ? [
+                      "ดูแดชบอร์ด",
+                      "ดูรายงานยอดขาย",
+                      "เครื่องคำนวณส่วนต่าง",
+                      "นำเข้าข้อมูล Excel",
+                      "จัดการผู้ใช้งาน",
+                    ]
+                  : [
+                      "ดูแดชบอร์ด",
+                      "ดูรายงานยอดขาย",
+                      "เครื่องคำนวณส่วนต่าง",
+                      "นำเข้าข้อมูล Excel",
+                    ];
+              return {
+                ...u,
+                tasks: Array.isArray(u.tasks) && u.tasks.length > 0 ? u.tasks : defaultTasks,
+              };
+            });
+          }
         }
       } catch {
         // ignore
@@ -664,173 +662,50 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, []);
 
-  // --- Supabase Initial Data Fetching ---
+  // --- LocalStorage Caching ---
   useEffect(() => {
-    let isMounted = true;
-    async function loadDataFromSupabase() {
-      try {
-        const [remoteUsers, remoteProducts, remoteOrders, remoteLogs, remoteDatasets, remoteNotifs, remoteTrash] = await Promise.all([
-          fetchUsersFromSupabase(),
-          fetchProductsFromSupabase(),
-          fetchOrdersFromSupabase(),
-          fetchAuditLogsFromSupabase(),
-          fetchDatasetsFromSupabase(),
-          fetchNotificationsFromSupabase(),
-          fetchTrashFromSupabase(),
-        ]);
-
-        if (!isMounted) return;
-
-        if (remoteUsers && remoteUsers.length > 0) {
-          const merged = remoteUsers.map((ru) => {
-            const local = initialUsersList.find((iu) => iu.id === ru.id || iu.username === ru.username);
-            return {
-              ...local,
-              ...ru,
-              password: ru.password || local?.password || "admin1234",
-              tasks: Array.isArray(ru.tasks) && ru.tasks.length > 0 ? ru.tasks : local?.tasks || [],
-            };
-          });
-          setSystemUsers(merged);
-        }
-        if (remoteProducts !== null) {
-          setProducts(remoteProducts);
-        }
-        if (remoteLogs !== null && remoteLogs.length > 0) {
-          setAuditLogs(remoteLogs);
-        }
-        if (remoteDatasets !== null && remoteDatasets.length > 0) {
-          setUploadedDatasets(remoteDatasets);
-        } else {
-          const savedDatasets = localStorage.getItem("uploadedDatasets");
-          if (savedDatasets) {
-            try {
-              const parsed = JSON.parse(savedDatasets);
-              if (Array.isArray(parsed) && parsed.length > 0) {
-                parsed.forEach((d) => syncDatasetToSupabase(d));
-              }
-            } catch (e) {
-              console.warn("Failed to sync initial local datasets to Supabase:", e);
-            }
-          }
-        }
-        if (remoteNotifs !== null && remoteNotifs.length > 0) {
-          setNotifications(remoteNotifs);
-        }
-        if (remoteTrash !== null && remoteTrash.length > 0) {
-          setTrashItems(remoteTrash);
-        }
-        if (remoteOrders !== null && remoteOrders.length > 0) {
-          setOrders(remoteOrders);
-        } else {
-          const savedOrders = localStorage.getItem("orders");
-          const savedIncome = localStorage.getItem("income_data");
-          const allLocalOrders: Order[] = [];
-          if (savedOrders) {
-            try {
-              const p = JSON.parse(savedOrders);
-              if (Array.isArray(p)) allLocalOrders.push(...p);
-            } catch (err) {
-              console.warn("Error parsing savedOrders:", err);
-            }
-          }
-          if (savedIncome) {
-            try {
-              const p = JSON.parse(savedIncome);
-              if (Array.isArray(p)) allLocalOrders.push(...p);
-            } catch (err) {
-              console.warn("Error parsing savedIncome:", err);
-            }
-          }
-          if (allLocalOrders.length > 0) {
-            syncOrdersToSupabase(allLocalOrders);
-          }
-        }
-      } catch (err) {
-        console.error("Failed to load initial data from Supabase:", err);
-      }
+    try {
+      localStorage.setItem("products", JSON.stringify(products));
+    } catch (e) {
+      console.warn("Failed to save products to localStorage:", e);
     }
-    loadDataFromSupabase();
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  // --- Debounced LocalStorage & Supabase Synchronization ---
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      try {
-        localStorage.setItem("products", JSON.stringify(products));
-        if (products.length > 0) {
-          syncProductsToSupabase(products);
-        }
-      } catch (e) {
-        console.warn("Failed to save products to localStorage:", e);
-      }
-    }, 400);
-    return () => clearTimeout(timer);
   }, [products]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      try {
-        const regularOrders = orders.filter((o) => !o.isIncome);
-        const incomeOrders = orders.filter((o) => o.isIncome);
-        localStorage.setItem("orders", JSON.stringify(regularOrders));
-        localStorage.setItem("income_data", JSON.stringify(incomeOrders));
-        localStorage.setItem("mock_supabase_orders", JSON.stringify(orders));
-        window.dispatchEvent(new Event("mock_supabase_orders_updated"));
-
-        if (orders.length > 0) {
-          syncOrdersToSupabase(orders);
-        }
-      } catch (e) {
-        console.warn("Failed to save orders to localStorage:", e);
-      }
-    }, 500);
-    return () => clearTimeout(timer);
+    try {
+      const regularOrders = orders.filter((o) => !o.isIncome);
+      const incomeOrders = orders.filter((o) => o.isIncome);
+      localStorage.setItem("orders", JSON.stringify(regularOrders));
+      localStorage.setItem("income_data", JSON.stringify(incomeOrders));
+      localStorage.setItem("mock_supabase_orders", JSON.stringify(orders));
+      window.dispatchEvent(new Event("mock_supabase_orders_updated"));
+    } catch (e) {
+      console.warn("Failed to save orders to localStorage:", e);
+    }
   }, [orders]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      try {
-        localStorage.setItem("systemUsers", JSON.stringify(systemUsers));
-        if (systemUsers.length > 0) {
-          systemUsers.forEach((u) => syncUserToSupabase(u));
-        }
-      } catch (e) {
-        console.warn("Failed to save systemUsers to localStorage:", e);
-      }
-    }, 400);
-    return () => clearTimeout(timer);
+    try {
+      localStorage.setItem("systemUsers", JSON.stringify(systemUsers));
+    } catch (e) {
+      console.warn("Failed to save systemUsers to localStorage:", e);
+    }
   }, [systemUsers]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      try {
-        localStorage.setItem("auditLogs", JSON.stringify(auditLogs));
-        if (auditLogs.length > 0) {
-          addAuditLogToSupabase(auditLogs[0]);
-        }
-      } catch (e) {
-        console.warn("Failed to save auditLogs to localStorage:", e);
-      }
-    }, 400);
-    return () => clearTimeout(timer);
+    try {
+      localStorage.setItem("auditLogs", JSON.stringify(auditLogs));
+    } catch (e) {
+      console.warn("Failed to save auditLogs to localStorage:", e);
+    }
   }, [auditLogs]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      try {
-        localStorage.setItem("appNotifications", JSON.stringify(notifications));
-        if (notifications.length > 0) {
-          notifications.forEach((n) => syncNotificationToSupabase(n));
-        }
-      } catch (e) {
-        console.warn("Failed to save appNotifications to localStorage:", e);
-      }
-    }, 400);
-    return () => clearTimeout(timer);
+    try {
+      localStorage.setItem("appNotifications", JSON.stringify(notifications));
+    } catch (e) {
+      console.warn("Failed to save appNotifications to localStorage:", e);
+    }
   }, [notifications]);
 
   useEffect(() => {
@@ -842,42 +717,27 @@ export default function App() {
   }, [adminUnreadCount]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      try {
-        localStorage.setItem("uploadedDatasets", JSON.stringify(uploadedDatasets));
-        if (uploadedDatasets.length > 0) {
-          uploadedDatasets.forEach((d) => syncDatasetToSupabase(d));
-        }
-      } catch (e) {
-        console.warn("Failed to save uploadedDatasets to localStorage:", e);
-      }
-    }, 600);
-    return () => clearTimeout(timer);
+    try {
+      localStorage.setItem("uploadedDatasets", JSON.stringify(uploadedDatasets));
+    } catch (e) {
+      console.warn("Failed to save uploadedDatasets to localStorage:", e);
+    }
   }, [uploadedDatasets]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      try {
-        localStorage.setItem("productFiles", JSON.stringify(productFiles));
-      } catch (e) {
-        console.warn("Failed to save productFiles to localStorage:", e);
-      }
-    }, 600);
-    return () => clearTimeout(timer);
+    try {
+      localStorage.setItem("productFiles", JSON.stringify(productFiles));
+    } catch (e) {
+      console.warn("Failed to save productFiles to localStorage:", e);
+    }
   }, [productFiles]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      try {
-        localStorage.setItem("trash_bin_items", JSON.stringify(trashItems));
-        if (trashItems.length > 0) {
-          trashItems.forEach((t) => syncTrashItemToSupabase(t));
-        }
-      } catch (e) {
-        console.warn("Failed to save trash_bin_items to localStorage:", e);
-      }
-    }, 600);
-    return () => clearTimeout(timer);
+    try {
+      localStorage.setItem("trash_bin_items", JSON.stringify(trashItems));
+    } catch (e) {
+      console.warn("Failed to save trash_bin_items to localStorage:", e);
+    }
   }, [trashItems]);
 
   useEffect(() => {
@@ -1002,42 +862,63 @@ export default function App() {
   const lastPostTimeRef = useRef<number>(0);
   const isSyncingFromRemoteRef = useRef<boolean>(false);
 
-  // Fast equality check for collection updates to avoid expensive full JSON serialization on every tick
+  // Fast equality check for collection updates to avoid unnecessary state re-renders and loops
   const hasCollectionChanged = <T extends { id?: string | number }>(incoming: T[] | undefined, current: T[]): boolean => {
     if (!Array.isArray(incoming)) return false;
     if (incoming.length !== current.length) return true;
     if (incoming.length === 0) return false;
-    // Check first, middle, and last item ID / object reference
-    if (incoming[0]?.id !== current[0]?.id) return true;
-    const mid = Math.floor(incoming.length / 2);
-    if (incoming[mid]?.id !== current[mid]?.id) return true;
-    const last = incoming.length - 1;
-    if (incoming[last]?.id !== current[last]?.id) return true;
+    const currentIdSet = new Set(current.map((item) => String(item?.id || "")));
+    for (const item of incoming) {
+      if (!currentIdSet.has(String(item?.id || ""))) {
+        return true;
+      }
+    }
     return false;
   };
 
   // Helper function to apply incoming remote sync data from SSE, Polling, or BroadcastChannel
-  const applyRemoteSyncData = useCallback((data: RemoteSyncPayload | Record<string, unknown> | null | undefined, isFromSSE: boolean = false) => {
+  const applyRemoteSyncData = useCallback((data: RemoteSyncPayload | Record<string, unknown> | null | undefined, _isFromSSE: boolean = false) => {
     if (!data || typeof data !== "object") return;
 
     const currentLocal = localStateRef.current;
-    const prevUploadedCount = currentLocal.uploadedDatasets.length;
-    const prevProductFilesCount = currentLocal.productFiles.length;
-    const prevTrashCount = currentLocal.trashItems.length;
-
-    let hasChanges = false;
 
     // Normalizing Users
     let mergedUsers: AppUser[] | undefined = undefined;
     if (Array.isArray(data.systemUsers)) {
-      mergedUsers = (data.systemUsers as AppUser[]).map((u: AppUser) => {
-        const match = initialUsersList.find((iu) => iu.id === u.id);
-        return {
-          ...match,
-          ...u,
-          tasks: u.tasks || match?.tasks || []
-        };
-      });
+      const mockUsernames = new Set(["somchai", "somsri", "marcus", "sophia"]);
+      mergedUsers = (data.systemUsers as AppUser[])
+        .filter(
+          (u) =>
+            !mockUsernames.has(u.username?.toLowerCase() || "") &&
+            u.id !== "USR-002" &&
+            u.id !== "USR-003" &&
+            u.id !== "USR-004" &&
+            u.id !== "USR-005",
+        )
+        .map((u: AppUser) => {
+          const defaultTasks =
+            u.role === "Manager"
+              ? [
+                  "ดูแดชบอร์ด",
+                  "ดูรายงานยอดขาย",
+                  "เครื่องคำนวณส่วนต่าง",
+                  "นำเข้าข้อมูล Excel",
+                  "จัดการผู้ใช้งาน",
+                ]
+              : [
+                  "ดูแดชบอร์ด",
+                  "ดูรายงานยอดขาย",
+                  "เครื่องคำนวณส่วนต่าง",
+                  "นำเข้าข้อมูล Excel",
+                ];
+          return {
+            ...u,
+            tasks: Array.isArray(u.tasks) && u.tasks.length > 0 ? u.tasks : defaultTasks,
+          };
+        });
+      if (mergedUsers.length === 0) {
+        mergedUsers = initialUsersList;
+      }
     }
 
     const normalizedData: RemoteSyncPayload = {
@@ -1049,58 +930,36 @@ export default function App() {
 
     if (Array.isArray(normalizedData.products) && hasCollectionChanged(normalizedData.products, currentLocal.products)) {
       setProducts(normalizedData.products);
-      hasChanges = true;
     }
     if (Array.isArray(normalizedData.orders) && hasCollectionChanged(normalizedData.orders, currentLocal.orders)) {
       setOrders(normalizedData.orders);
-      hasChanges = true;
     }
     if (Array.isArray(normalizedData.systemUsers) && hasCollectionChanged(normalizedData.systemUsers, currentLocal.systemUsers)) {
       setSystemUsers(normalizedData.systemUsers);
-      hasChanges = true;
     }
     if (Array.isArray(normalizedData.auditLogs) && hasCollectionChanged(normalizedData.auditLogs, currentLocal.auditLogs)) {
       setAuditLogs(normalizedData.auditLogs);
-      hasChanges = true;
     }
     if (Array.isArray(normalizedData.uploadedDatasets) && hasCollectionChanged(normalizedData.uploadedDatasets, currentLocal.uploadedDatasets)) {
       setUploadedDatasets(normalizedData.uploadedDatasets);
-      hasChanges = true;
     }
     if (Array.isArray(normalizedData.productFiles) && hasCollectionChanged(normalizedData.productFiles, currentLocal.productFiles)) {
       setProductFiles(normalizedData.productFiles);
-      hasChanges = true;
     }
     if (Array.isArray(normalizedData.trashItems) && hasCollectionChanged(normalizedData.trashItems, currentLocal.trashItems)) {
       setTrashItems(normalizedData.trashItems);
-      hasChanges = true;
     }
     if (Array.isArray(normalizedData.notifications) && hasCollectionChanged(normalizedData.notifications, currentLocal.notifications)) {
       setNotifications(normalizedData.notifications);
-      hasChanges = true;
     }
     if (typeof normalizedData.adminUnreadCount === "number" && normalizedData.adminUnreadCount !== currentLocal.adminUnreadCount) {
       setAdminUnreadCount(normalizedData.adminUnreadCount);
-      hasChanges = true;
-    }
-
-    // Trigger visual toast when action happened on another device
-    if (hasChanges && isFromSSE) {
-      const newUploadedCount = Array.isArray(normalizedData.uploadedDatasets) ? normalizedData.uploadedDatasets.length : prevUploadedCount;
-      const newProductFilesCount = Array.isArray(normalizedData.productFiles) ? normalizedData.productFiles.length : prevProductFilesCount;
-      const newTrashCount = Array.isArray(normalizedData.trashItems) ? normalizedData.trashItems.length : prevTrashCount;
-
-      if (newUploadedCount > prevUploadedCount || newProductFilesCount > prevProductFilesCount) {
-        triggerAlert("📥 มีการนำเข้าไฟล์ข้อมูลใหม่จากอุปกรณ์อื่น", "info");
-      } else if (newTrashCount > prevTrashCount || newUploadedCount < prevUploadedCount || newProductFilesCount < prevProductFilesCount) {
-        triggerAlert("🗑️ มีการอัปเดตข้อมูล / ลบไฟล์จากอุปกรณ์อื่น (ดูได้ที่ถังขยะ)", "info");
-      }
     }
 
     setTimeout(() => {
       isSyncingFromRemoteRef.current = false;
-    }, 200);
-  }, [triggerAlert]);
+    }, 300);
+  }, []);
 
   // BroadcastChannel for instant same-browser multi-tab sync
   const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
@@ -1131,6 +990,27 @@ export default function App() {
     
     const fetchInitialData = async () => {
       try {
+        // Priority 1: Supabase Cloud (Global Data for all devices)
+        const cloudData = await fetchFullAppStateFromSupabase();
+        if (
+          cloudData &&
+          (cloudData.orders.length > 0 ||
+            cloudData.products.length > 0 ||
+            cloudData.uploadedDatasets.length > 0 ||
+            cloudData.productFiles.length > 0 ||
+            cloudData.systemUsers.length > 0)
+        ) {
+          if (isMounted) {
+            applyRemoteSyncData(cloudData, false);
+          }
+          fetch("/api/data", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(cloudData),
+          }).catch(() => {});
+          return;
+        }
+
         const res = await fetch("/api/data");
         if (!res.ok) throw new Error("Failed to fetch");
         const data = await res.json();
@@ -1139,6 +1019,7 @@ export default function App() {
           if (data && (Array.isArray(data.orders) || Array.isArray(data.products) || Array.isArray(data.systemUsers) || Array.isArray(data.uploadedDatasets))) {
             // Server has data! Update states from server.
             applyRemoteSyncData(data, false);
+            syncFullAppStateToSupabase(data).catch(() => {});
           } else {
             // Server is empty! Bootstrap server using local cache
             const localProducts = localStorage.getItem("products");
@@ -1155,15 +1036,39 @@ export default function App() {
             if (localUsers) {
               try {
                 const parsed = JSON.parse(localUsers);
-                if (Array.isArray(parsed)) {
-                  parsedUsers = parsed.map((u: AppUser) => {
-                    const match = initialUsersList.find((iu) => iu.id === u.id);
-                    return {
-                      ...match,
-                      ...u,
-                      tasks: u.tasks || match?.tasks || []
-                    };
-                  });
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                  const mockUsernames = new Set(["somchai", "somsri", "marcus", "sophia"]);
+                  const cleaned = parsed.filter(
+                    (u: AppUser) =>
+                      !mockUsernames.has(u.username?.toLowerCase() || "") &&
+                      u.id !== "USR-002" &&
+                      u.id !== "USR-003" &&
+                      u.id !== "USR-004" &&
+                      u.id !== "USR-005",
+                  );
+                  if (cleaned.length > 0) {
+                    parsedUsers = cleaned.map((u: AppUser) => {
+                      const defaultTasks =
+                        u.role === "Manager"
+                          ? [
+                              "ดูแดชบอร์ด",
+                              "ดูรายงานยอดขาย",
+                              "เครื่องคำนวณส่วนต่าง",
+                              "นำเข้าข้อมูล Excel",
+                              "จัดการผู้ใช้งาน",
+                            ]
+                          : [
+                              "ดูแดชบอร์ด",
+                              "ดูรายงานยอดขาย",
+                              "เครื่องคำนวณส่วนต่าง",
+                              "นำเข้าข้อมูล Excel",
+                            ];
+                      return {
+                        ...u,
+                        tasks: Array.isArray(u.tasks) && u.tasks.length > 0 ? u.tasks : defaultTasks,
+                      };
+                    });
+                  }
                 }
               } catch {
                 // ignore parsing error
@@ -1190,12 +1095,14 @@ export default function App() {
               adminUnreadCount: localUnread ? parseInt(localUnread, 10) : 0
             };
             
-            // Save to server
-            await fetch("/api/data", {
+            // Save to server & Supabase Cloud
+            fetch("/api/data", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(bootstrapPayload)
-            });
+            }).catch(() => {});
+
+            syncFullAppStateToSupabase(bootstrapPayload).catch(() => {});
             
             setProducts(bootstrapPayload.products);
             setOrders(bootstrapPayload.orders);
@@ -1224,7 +1131,37 @@ export default function App() {
     };
   }, [applyRemoteSyncData]);
 
-  // 2. Real-Time Server-Sent Events (SSE) Listener with Auto Reconnect
+  // 2. Supabase Real-Time Cloud Changes Subscription
+  useEffect(() => {
+    let activeChannel: ReturnType<typeof supabase.channel> | null = null;
+    try {
+      activeChannel = supabase
+        .channel("supabase-realtime-global-sync")
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public" },
+          async () => {
+            if (isSyncingFromRemoteRef.current) return;
+            if (Date.now() - lastPostTimeRef.current < 2500) return;
+            const freshData = await fetchFullAppStateFromSupabase();
+            if (freshData) {
+              applyRemoteSyncData(freshData, true);
+            }
+          }
+        )
+        .subscribe();
+    } catch (err) {
+      console.warn("Supabase Realtime subscription error:", err);
+    }
+
+    return () => {
+      if (activeChannel) {
+        supabase.removeChannel(activeChannel);
+      }
+    };
+  }, [applyRemoteSyncData]);
+
+  // 3. Real-Time Server-Sent Events (SSE) Listener with Auto Reconnect (For Local Network)
   useEffect(() => {
     if (typeof window === "undefined" || !("EventSource" in window)) return;
 
@@ -1296,16 +1233,18 @@ export default function App() {
     };
   }, [applyRemoteSyncData]);
 
-  // 3. Smart Fallback Polling (Only runs if SSE is disconnected, every 15s)
+  // 3. Fallback Polling (Checks Supabase Cloud & Local Server)
   useEffect(() => {
     let timerId: ReturnType<typeof setTimeout>;
     let isMounted = true;
     
     const pollData = async () => {
-      // If SSE is active, skip polling completely to save CPU and Network
-      if (!isSSEConnectedRef.current) {
-        const startTime = Date.now();
-        try {
+      const startTime = Date.now();
+      try {
+        const cloudData = await fetchFullAppStateFromSupabase();
+        if (cloudData && isMounted && startTime >= lastPostTimeRef.current) {
+          applyRemoteSyncData(cloudData, false);
+        } else if (!isSSEConnectedRef.current) {
           const res = await fetch("/api/data");
           if (res.ok) {
             const data = await res.json();
@@ -1313,9 +1252,9 @@ export default function App() {
               applyRemoteSyncData(data, false);
             }
           }
-        } catch {
-          // Polling silent catch
         }
+      } catch {
+        // Polling silent catch
       }
 
       if (isMounted) {
@@ -1331,7 +1270,7 @@ export default function App() {
     };
   }, [applyRemoteSyncData]);
 
-  // 4. Save modifications to server (Debounced & Broadcasted)
+  // 4. Save modifications to Supabase Cloud & Local Server (Debounced & Broadcasted)
   useEffect(() => {
     if (!isInitialLoadComplete || isSyncingFromRemoteRef.current) return;
 
@@ -1348,19 +1287,24 @@ export default function App() {
         adminUnreadCount
       };
       
-      const saveToServer = async () => {
+      const saveToServerAndCloud = async () => {
         const postTime = Date.now();
         lastPostTimeRef.current = postTime;
         try {
+          // 1. Sync to Supabase Cloud Database (Global source of truth for all users/devices)
+          syncFullAppStateToSupabase(payload).catch((e) => {
+            console.warn("Supabase background sync notice:", e);
+          });
+
+          // 2. Sync to local backend /api/data
           const payloadStr = JSON.stringify(payload);
-          const res = await fetch("/api/data", {
+          await fetch("/api/data", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: payloadStr
-          });
-          if (!res.ok) throw new Error("Failed to save");
+          }).catch(() => {});
 
-          // Broadcast to other tabs in same browser immediately
+          // 3. Broadcast to other tabs in same browser immediately
           if (broadcastChannelRef.current) {
             try {
               broadcastChannelRef.current.postMessage({ type: "sync", data: payload });
@@ -1369,11 +1313,11 @@ export default function App() {
             }
           }
         } catch (err) {
-          console.error("Failed to save data to server:", err);
+          console.error("Failed to save data to server/cloud:", err);
         }
       };
       
-      saveToServer();
+      saveToServerAndCloud();
     }, 600);
 
     return () => clearTimeout(timer);
@@ -1678,6 +1622,11 @@ export default function App() {
         const existingIds = new Set(prev.map((d) => d.id));
         const filtered = newFiles.filter((d) => !existingIds.has(d.id));
         return [...prev, ...filtered];
+      });
+
+      // Sync all imported product files to Supabase Cloud immediately
+      newFiles.forEach((f) => {
+        syncDatasetToSupabase({ ...f, fileType: "product" }).catch(() => {});
       });
 
       // Extract products from dataset sheets if available and auto-sync to Supabase Orders table
@@ -2410,9 +2359,21 @@ export default function App() {
     setProducts(updatedProducts);
     syncProductsToSupabase(updatedProducts);
     setOrders(finalOrders);
-    setUploadedDatasets([...remainingDatasets, ...newDatasets]);
-    newDatasets.forEach((d) => syncDatasetToSupabase(d));
-    syncOrdersToSupabase(newOrders);
+
+    const normalizedDatasets = newDatasets.map((d) => ({
+      ...d,
+      fileType: d.fileType || (salesSubTab === "products" ? "product" : d.type === "income" ? "income" : "sales")
+    }));
+
+    setUploadedDatasets([...remainingDatasets, ...normalizedDatasets]);
+    setProductFiles((prev) => {
+      const remainingPf = prev.filter(d => !newDatasetIds.has(d.id));
+      const newPf = normalizedDatasets.filter(d => d.fileType === "product" || d.type === "order" || salesSubTab === "products");
+      return [...remainingPf, ...newPf];
+    });
+
+    normalizedDatasets.forEach((d) => syncDatasetToSupabase(d).catch(() => {}));
+    syncOrdersToSupabase(newOrders).catch(() => {});
 
     const log: AuditLog = {
       id: `LOG-${Math.floor(10000 + Math.random() * 90000)}`,
@@ -3068,6 +3029,7 @@ export default function App() {
     email: string;
     role: AppUser["role"];
     password: AppUser["password"];
+    tasks?: string[];
   }) => {
     if (t.password.length < 6) {
       triggerAlert("รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษร");
@@ -3083,18 +3045,46 @@ export default function App() {
       return;
     }
 
+    const defaultTasks =
+      t.role === "Manager"
+        ? [
+            "ดูแดชบอร์ด",
+            "ดูรายงานยอดขาย",
+            "เครื่องคำนวณส่วนต่าง",
+            "นำเข้าข้อมูล Excel",
+            "จัดการผู้ใช้งาน",
+          ]
+        : [
+            "ดูแดชบอร์ด",
+            "ดูรายงานยอดขาย",
+            "เครื่องคำนวณส่วนต่าง",
+            "นำเข้าข้อมูล Excel",
+          ];
+
+    const finalTasks =
+      Array.isArray(t.tasks) && t.tasks.length > 0 ? t.tasks : defaultTasks;
+
     const newUser: AppUser = {
       id: `USR-${Math.floor(100 + Math.random() * 900)}`,
       name: t.name,
       email: t.email,
-      username: t.name.toLowerCase().replace(/[^a-z0-9]/g, ""),
+      username: t.name.toLowerCase().replace(/[^a-z0-9]/g, "") || `user${Math.floor(100 + Math.random() * 900)}`,
       role: t.role,
       status: "Active",
       password: t.password,
-      tasks: [],
+      tasks: finalTasks,
     };
 
-    setSystemUsers((prev) => [...prev, newUser]);
+    setSystemUsers((prev) => {
+      const updated = [...prev, newUser];
+      try {
+        localStorage.setItem("systemUsers", JSON.stringify(updated));
+      } catch (e) {
+        console.warn("Failed to save systemUsers in localStorage:", e);
+      }
+      return updated;
+    });
+    syncUserToSupabase(newUser);
     setIsAddUserOpen(false);
 
     const log: AuditLog = {
@@ -3146,13 +3136,15 @@ export default function App() {
       return;
     }
 
-    const remainingUsers = systemUsers.filter((u) => u.id !== id);
-    setSystemUsers(remainingUsers);
-    try {
-      localStorage.setItem("systemUsers", JSON.stringify(remainingUsers));
-    } catch (e) {
-      console.warn("Failed to update systemUsers in localStorage:", e);
-    }
+    setSystemUsers((prevUsers) => {
+      const remainingUsers = prevUsers.filter((u) => u.id !== id);
+      try {
+        localStorage.setItem("systemUsers", JSON.stringify(remainingUsers));
+      } catch (e) {
+        console.warn("Failed to update systemUsers in localStorage:", e);
+      }
+      return remainingUsers;
+    });
 
     deleteUserFromSupabase(id);
 

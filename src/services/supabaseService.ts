@@ -568,3 +568,136 @@ export async function clearTrashFromSupabase(): Promise<boolean> {
   }
 }
 
+// ==================== FULL APP STATE SYNC ====================
+export async function fetchFullAppStateFromSupabase(): Promise<{
+  products: Product[];
+  orders: Order[];
+  systemUsers: AppUser[];
+  auditLogs: AuditLog[];
+  uploadedDatasets: UploadedDataset[];
+  productFiles: UploadedDataset[];
+  trashItems: TrashItem[];
+  notifications: AppNotification[];
+} | null> {
+  try {
+    const [
+      users,
+      products,
+      orders,
+      datasets,
+      notifications,
+      trash,
+      auditLogs,
+    ] = await Promise.all([
+      fetchUsersFromSupabase(),
+      fetchProductsFromSupabase(),
+      fetchOrdersFromSupabase(),
+      fetchDatasetsFromSupabase(),
+      fetchNotificationsFromSupabase(),
+      fetchTrashFromSupabase(),
+      fetchAuditLogsFromSupabase(),
+    ]);
+
+    // If all essential queries failed (e.g., offline or bad network), return null
+    if (!users && !products && !orders && !datasets) {
+      return null;
+    }
+
+    const allDatasets = datasets || [];
+    const productFiles = allDatasets.filter(
+      (d) =>
+        d.fileType === "product" ||
+        (d.type as string) === "product" ||
+        d.fileType === "order" ||
+        (d.type as string) === "order" ||
+        (!d.fileType && d.type !== "income" && !d.fileName.toLowerCase().includes("income") && !d.fileName.toLowerCase().includes("รายรับ") && !d.fileName.toLowerCase().includes("statement"))
+    );
+    const uploadedDatasets = allDatasets;
+
+    return {
+      systemUsers: users || [],
+      products: products || [],
+      orders: orders || [],
+      uploadedDatasets,
+      productFiles,
+      notifications: notifications || [],
+      trashItems: trash || [],
+      auditLogs: auditLogs || [],
+    };
+  } catch (err) {
+    console.error("Failed to fetch full app state from Supabase:", err);
+    return null;
+  }
+}
+
+export async function syncFullAppStateToSupabase(payload: {
+  products?: Product[];
+  orders?: Order[];
+  systemUsers?: AppUser[];
+  auditLogs?: AuditLog[];
+  uploadedDatasets?: UploadedDataset[];
+  productFiles?: UploadedDataset[];
+  trashItems?: TrashItem[];
+  notifications?: AppNotification[];
+}): Promise<void> {
+  try {
+    const syncPromises: Promise<unknown>[] = [];
+
+    if (payload.products && payload.products.length > 0) {
+      syncPromises.push(syncProductsToSupabase(payload.products));
+    }
+
+    if (payload.orders && payload.orders.length > 0) {
+      syncPromises.push(syncOrdersToSupabase(payload.orders));
+    }
+
+    if (payload.systemUsers && payload.systemUsers.length > 0) {
+      for (const u of payload.systemUsers) {
+        syncPromises.push(syncUserToSupabase(u));
+      }
+    }
+
+    // Merge datasets uniquely by id to prevent duplicate sync or flipping fileType
+    const datasetMap = new Map<string, UploadedDataset>();
+    if (payload.uploadedDatasets) {
+      for (const ds of payload.uploadedDatasets) {
+        if (ds && ds.id) {
+          datasetMap.set(ds.id, ds);
+        }
+      }
+    }
+    if (payload.productFiles) {
+      for (const pf of payload.productFiles) {
+        if (pf && pf.id) {
+          // If already in map, keep existing or merge cleanly without overriding
+          const existing = datasetMap.get(pf.id);
+          datasetMap.set(pf.id, {
+            ...pf,
+            fileType: pf.fileType || existing?.fileType || "product",
+          });
+        }
+      }
+    }
+    for (const ds of datasetMap.values()) {
+      syncPromises.push(syncDatasetToSupabase(ds));
+    }
+
+    if (payload.trashItems) {
+      for (const t of payload.trashItems) {
+        syncPromises.push(syncTrashItemToSupabase(t));
+      }
+    }
+
+    if (payload.notifications) {
+      for (const n of payload.notifications) {
+        syncPromises.push(syncNotificationToSupabase(n));
+      }
+    }
+
+    await Promise.allSettled(syncPromises);
+  } catch (err) {
+    console.error("Failed to sync full app state to Supabase:", err);
+  }
+}
+
+

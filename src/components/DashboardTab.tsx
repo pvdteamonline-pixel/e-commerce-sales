@@ -29,11 +29,7 @@ import {
   Printer,
   FileSpreadsheet,
   Tag,
-  FileText,
-  Layers,
 } from "lucide-react";
-import * as XLSX from "xlsx";
-import { sanitizeCellForExport } from "../utils/security";
 import {
   AreaChart,
   Area,
@@ -1074,164 +1070,7 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
     document.body.removeChild(link);
   };
 
-  // Export handlers for Calculator slide (Slide 1)
-  const handleExportCalcMonthlyExcel = () => {
-    const monthBuckets = new Map<string, Order[]>();
-    allCombinedOrders.forEach((o) => {
-      if (!o.date) return;
-      const d = o.date.split(" ")[0].split("T")[0];
-      const match = d.match(/^(\d{4}-\d{2})/);
-      if (!match) return;
-      const mKey = match[1];
-      if (!monthBuckets.has(mKey)) monthBuckets.set(mKey, []);
-      monthBuckets.get(mKey)!.push(o);
-    });
 
-    const sortedKeys = Array.from(monthBuckets.keys()).sort();
-    if (sortedKeys.length === 0) {
-      alert("ไม่มีข้อมูลรายเดือนที่จะส่งออก");
-      return;
-    }
-
-    const headers = [
-      ["รายงานสรุปยอดขายและผลตอบแทนรายเดือน (Monthly Sales & MoM Growth Report)"],
-      [`ช่วงวันที่: ${customStartDate} ถึง ${customEndDate}`],
-      [`วันที่ออกรายงาน: ${new Date().toLocaleString("th-TH")}`],
-      [],
-      ["ลำดับ", "เดือน/ปี", "ยอดขายรวม (฿)", "เติบโตยอดขาย (MoM %)", "ส่วนต่างยอดขาย (฿)", "หักคืนเงิน (฿)", "ยอดขายสุทธิ (฿)", "ค่าธรรมเนียม (฿)", "ค่าจัดส่ง (฿)", "รายรับสุทธิเข้าบัญชี (฿)", "เติบโตรายรับ (MoM %)", "จำนวนคำสั่งซื้อ", "จำนวนชิ้น (ชิ้น)", "AOV (฿)"]
-    ];
-
-    let prevGross: number | undefined;
-    let prevPayout: number | undefined;
-    const rows = sortedKeys.map((mKey, idx) => {
-      const mOrders = monthBuckets.get(mKey) || [];
-      const gross = mOrders.reduce((s, o) => s + getOrderGrossAmount(o), 0);
-      const refunded = mOrders.reduce((s, o) => ((o.status === "Refunded" || (o.total || 0) < 0) ? s + getOrderGrossAmount(o) : s), 0);
-      const net = Math.max(0, gross - refunded);
-      const fee = mOrders.reduce((s, o) => s + (o.platformFee || 0), 0);
-      const shipping = mOrders.reduce((s, o) => s + (o.shippingFee || 0), 0);
-      const payout = mOrders.filter((o) => o.status !== "Refunded" && (o.total || 0) >= 0).reduce((s, o) => {
-        if (typeof o.netIncome === "number" && o.netIncome !== 0) return s + o.netIncome;
-        return s + Math.max(0, getOrderGrossAmount(o) - (o.platformFee || 0) - (o.shippingFee || 0));
-      }, 0);
-      const units = mOrders.reduce((s, o) => s + (o.quantity || 1), 0);
-      const aov = mOrders.length > 0 ? Math.round((gross / mOrders.length) * 100) / 100 : 0;
-
-      const grossGrowth = prevGross !== undefined && prevGross > 0 ? `${(((gross - prevGross) / prevGross) * 100).toFixed(2)}%` : "-";
-      const grossDelta = prevGross !== undefined ? gross - prevGross : 0;
-      const payoutGrowth = prevPayout !== undefined && prevPayout > 0 ? `${(((payout - prevPayout) / prevPayout) * 100).toFixed(2)}%` : "-";
-
-      prevGross = gross;
-      prevPayout = payout;
-
-      return [
-        idx + 1,
-        mKey,
-        gross,
-        grossGrowth,
-        grossDelta,
-        refunded,
-        net,
-        fee,
-        shipping,
-        payout,
-        payoutGrowth,
-        mOrders.length,
-        units,
-        aov
-      ];
-    });
-
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet([...headers, ...rows]);
-    ws["!cols"] = [{ wch: 8 }, { wch: 16 }, { wch: 18 }, { wch: 20 }, { wch: 18 }, { wch: 16 }, { wch: 18 }, { wch: 18 }, { wch: 16 }, { wch: 22 }, { wch: 20 }, { wch: 18 }, { wch: 16 }, { wch: 16 }];
-    XLSX.utils.book_append_sheet(wb, ws, "สรุปรายเดือน_MoM");
-    XLSX.writeFile(wb, `calculator_monthly_report_${new Date().toISOString().split("T")[0]}.xlsx`);
-  };
-
-  const handleExportCalcOrdersExcel = () => {
-    const list = baseTransactionsList;
-    if (list.length === 0) {
-      alert("ไม่มีข้อมูลคำสั่งซื้อที่จะส่งออก");
-      return;
-    }
-    const headers = [
-      ["รายงานรายการคำสั่งซื้อที่ใช้คำนวณ (Calculated Orders Report)"],
-      [`ช่วงวันที่: ${customStartDate} ถึง ${customEndDate}`],
-      [`วันที่ออกรายงาน: ${new Date().toLocaleString("th-TH")}`],
-      [],
-      ["ลำดับ", "รหัสคำสั่งซื้อ", "วันที่", "ชื่อสินค้า", "แบรนด์", "ช่องทาง", "จำนวน", "ยอดรวม (฿)", "ค่าธรรมเนียม (฿)", "ค่าจัดส่ง (฿)", "รายรับสุทธิ (฿)", "สถานะ", "ไฟล์"]
-    ];
-
-    const rows = list.map((o, idx) => [
-      idx + 1,
-      sanitizeCellForExport(o.id || "-"),
-      sanitizeCellForExport(o.date || "-"),
-      sanitizeCellForExport(o.productName || o.itemName || "-"),
-      sanitizeCellForExport(resolveBrandName(o.brand, o.productName, o, products)),
-      sanitizeCellForExport(o.channel || "ทั่วไป"),
-      o.quantity || 1,
-      getOrderGrossAmount(o),
-      o.platformFee || 0,
-      o.shippingFee || 0,
-      Number(o.netIncome ?? (getOrderGrossAmount(o) - (o.platformFee || 0) - (o.shippingFee || 0))),
-      o.status || "Paid",
-      sanitizeCellForExport(o.fileName || o.datasetName || "-")
-    ]);
-
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet([...headers, ...rows]);
-    ws["!cols"] = [{ wch: 8 }, { wch: 24 }, { wch: 18 }, { wch: 32 }, { wch: 16 }, { wch: 14 }, { wch: 10 }, { wch: 16 }, { wch: 18 }, { wch: 14 }, { wch: 16 }, { wch: 14 }, { wch: 25 }];
-    XLSX.utils.book_append_sheet(wb, ws, "รายการคำสั่งซื้อที่คำนวณ");
-    XLSX.writeFile(wb, `calculator_orders_report_${new Date().toISOString().split("T")[0]}.xlsx`);
-  };
-
-  const handleExportCalcAllInOneExcel = () => {
-    const wb = XLSX.utils.book_new();
-
-    // Sheet 1: Monthly
-    const monthBuckets = new Map<string, Order[]>();
-    allCombinedOrders.forEach((o) => {
-      if (!o.date) return;
-      const d = o.date.split(" ")[0].split("T")[0];
-      const match = d.match(/^(\d{4}-\d{2})/);
-      if (!match) return;
-      const mKey = match[1];
-      if (!monthBuckets.has(mKey)) monthBuckets.set(mKey, []);
-      monthBuckets.get(mKey)!.push(o);
-    });
-    const sortedKeys = Array.from(monthBuckets.keys()).sort();
-    const rows1 = sortedKeys.map((mKey, idx) => {
-      const mOrders = monthBuckets.get(mKey) || [];
-      const gross = mOrders.reduce((s, o) => s + getOrderGrossAmount(o), 0);
-      const refunded = mOrders.reduce((s, o) => ((o.status === "Refunded" || (o.total || 0) < 0) ? s + getOrderGrossAmount(o) : s), 0);
-      const fee = mOrders.reduce((s, o) => s + (o.platformFee || 0), 0);
-      const payout = mOrders.filter((o) => o.status !== "Refunded" && (o.total || 0) >= 0).reduce((s, o) => s + Math.max(0, getOrderGrossAmount(o) - (o.platformFee || 0) - (o.shippingFee || 0)), 0);
-      return [idx + 1, mKey, gross, refunded, gross - refunded, fee, payout, mOrders.length];
-    });
-    const ws1 = XLSX.utils.aoa_to_sheet([["รายงานสรุปรายเดือน"], [], ["ลำดับ", "เดือน/ปี", "ยอดขายรวม (฿)", "คืนเงิน (฿)", "ยอดขายสุทธิ (฿)", "ค่าธรรมเนียม (฿)", "รายรับสุทธิ (฿)", "จำนวนออเดอร์"], ...rows1]);
-    XLSX.utils.book_append_sheet(wb, ws1, "1.สรุปรายเดือน");
-
-    // Sheet 2: Orders
-    const list = baseTransactionsList.slice(0, 5000);
-    const rows2 = list.map((o, idx) => [
-      idx + 1,
-      sanitizeCellForExport(o.id || "-"),
-      sanitizeCellForExport(o.date || "-"),
-      sanitizeCellForExport(o.productName || o.itemName || "-"),
-      sanitizeCellForExport(resolveBrandName(o.brand, o.productName, o, products)),
-      sanitizeCellForExport(o.channel || "ทั่วไป"),
-      o.quantity || 1,
-      getOrderGrossAmount(o),
-      o.platformFee || 0,
-      Number(o.netIncome ?? (getOrderGrossAmount(o) - (o.platformFee || 0))),
-      o.status || "Paid"
-    ]);
-    const ws2 = XLSX.utils.aoa_to_sheet([["รายการคำสั่งซื้อที่ใช้คำนวณ"], [], ["ลำดับ", "รหัสคำสั่งซื้อ", "วันที่", "ชื่อสินค้า", "แบรนด์", "ช่องทาง", "จำนวน", "ยอดขายรวม (฿)", "ค่าธรรมเนียม (฿)", "รายรับสุทธิ (฿)", "สถานะ"], ...rows2]);
-    XLSX.utils.book_append_sheet(wb, ws2, "2.รายการคำสั่งซื้อ");
-
-    XLSX.writeFile(wb, `calculator_complete_report_${new Date().toISOString().split("T")[0]}.xlsx`);
-  };
 
   const [activeMetric, setActiveMetric] = useState<
     | "revenue"
@@ -2189,272 +2028,139 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
             )}
           </div>
 
-          {/* Export Report Dropdown */}
-          <div className="relative w-full sm:w-auto shrink-0">
-            <button
-              onClick={() => setIsExportOpen(!isExportOpen)}
-              className={`group flex items-center justify-between gap-2.5 px-4 py-2.5 rounded-xl transition-all duration-300 font-bold text-xs cursor-pointer select-none w-full sm:w-auto border shadow-md hover:shadow-xl active:scale-[0.98] ${
-                isExportOpen
-                  ? kpiCarouselPage === 1
-                    ? "bg-indigo-600 text-white border-indigo-600 ring-4 ring-indigo-600/20 scale-[1.02]"
-                    : "bg-neutral-900 text-white dark:bg-white dark:text-neutral-950 border-neutral-950 dark:border-white ring-4 ring-neutral-900/15 dark:ring-white/25 scale-[1.02]"
-                  : "bg-neutral-900 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-100 dark:text-neutral-950 border-neutral-800 dark:border-neutral-200 hover:-translate-y-0.5"
-              }`}
-            >
-              <div className="flex items-center gap-2.5">
-                <div
-                  className={`p-1.5 rounded-lg transition-transform duration-300 group-hover:scale-110 ${
-                    isExportOpen
-                      ? "bg-white/20 text-white"
-                      : "bg-white/15 dark:bg-neutral-950/10 text-white dark:text-neutral-950"
-                  }`}
-                >
-                  <Download className="h-3.5 w-3.5" />
-                </div>
-                <span className="tracking-wide">
-                  {kpiCarouselPage === 1 ? "ส่งออกรายงานเครื่องคำนวณ" : "ส่งออกรายงาน"}
-                </span>
-              </div>
-              <ChevronDown
-                className={`h-3.5 w-3.5 transition-transform duration-300 opacity-80 group-hover:opacity-100 ${
-                  isExportOpen ? "rotate-180" : ""
+          {/* Export Report Dropdown (เฉพาะหน้าแดชบอร์ดหลัก) */}
+          {kpiCarouselPage === 0 && (
+            <div className="relative w-full sm:w-auto shrink-0">
+              <button
+                onClick={() => setIsExportOpen(!isExportOpen)}
+                className={`group flex items-center justify-between gap-2.5 px-4 py-2.5 rounded-xl transition-all duration-300 font-bold text-xs cursor-pointer select-none w-full sm:w-auto border shadow-md hover:shadow-xl active:scale-[0.98] ${
+                  isExportOpen
+                    ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-950 border-neutral-950 dark:border-white ring-4 ring-neutral-900/15 dark:ring-white/25 scale-[1.02]"
+                    : "bg-neutral-900 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-100 dark:text-neutral-950 border-neutral-800 dark:border-neutral-200 hover:-translate-y-0.5"
                 }`}
-              />
-            </button>
-
-            {isExportOpen && (
-              <>
-                <div
-                  className="fixed inset-0 z-40"
-                  onClick={() => setIsExportOpen(false)}
-                />
-                <div className="absolute right-0 top-full mt-2 w-80 sm:w-96 rounded-2xl border border-neutral-200/80 dark:border-neutral-800/80 bg-white/95 dark:bg-neutral-900/95 backdrop-blur-2xl shadow-2xl z-50 p-2 text-neutral-800 dark:text-neutral-100 animate-scale-in">
-                  {kpiCarouselPage === 1 ? (
-                    /* ---------------------------------------------------- */
-                    /* เมนูส่งออกเฉพาะหน้าเครื่องคำนวณ (Calculator Exports)  */
-                    /* ---------------------------------------------------- */
-                    <>
-                      <div className="px-3 py-1.5 mb-1 flex items-center justify-between gap-2 border-b border-neutral-100 dark:border-neutral-800/80 pb-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
-                          ตัวเลือกการส่งออก (เฉพาะเครื่องคำนวณ)
-                        </span>
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-semibold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-900/50">
-                          4 รายการ
-                        </span>
-                      </div>
-
-                      <div className="space-y-1">
-                        {/* All-in-One Multi-sheet Excel */}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsExportOpen(false);
-                            handleExportCalcAllInOneExcel();
-                          }}
-                          className="w-full text-left p-2.5 rounded-xl hover:bg-neutral-100/90 dark:hover:bg-neutral-800/80 transition-all cursor-pointer flex items-center gap-3 group/item"
-                        >
-                          <div className="h-9 w-9 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 border border-indigo-200/60 dark:border-indigo-800/40 flex items-center justify-center shrink-0 group-hover/item:scale-105 transition-transform">
-                            <Layers className="h-4 w-4" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center justify-between">
-                              <span className="font-semibold text-xs text-neutral-900 dark:text-neutral-100 group-hover/item:text-indigo-600 dark:group-hover/item:text-indigo-400 transition-colors">
-                                รวมรายงานเครื่องคำนวณทั้งหมด
-                              </span>
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-indigo-100/70 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900/50">
-                                Excel (ครบชุด)
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate mt-0.5">
-                              รวมชีตสรุปรายเดือน และรายการคำสั่งซื้อที่ใช้คำนวณ
-                            </p>
-                          </div>
-                        </button>
-
-                        {/* Monthly Summary & MoM Excel */}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsExportOpen(false);
-                            handleExportCalcMonthlyExcel();
-                          }}
-                          className="w-full text-left p-2.5 rounded-xl hover:bg-neutral-100/90 dark:hover:bg-neutral-800/80 transition-all cursor-pointer flex items-center gap-3 group/item"
-                        >
-                          <div className="h-9 w-9 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 border border-emerald-200/60 dark:border-emerald-800/40 flex items-center justify-center shrink-0 group-hover/item:scale-105 transition-transform">
-                            <FileSpreadsheet className="h-4 w-4" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center justify-between">
-                              <span className="font-semibold text-xs text-neutral-900 dark:text-neutral-100 group-hover/item:text-emerald-600 dark:group-hover/item:text-emerald-400 transition-colors">
-                                สรุปยอดขายรายเดือน & MoM
-                              </span>
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-100/70 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/50">
-                                Excel (.xlsx)
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate mt-0.5">
-                              ยอดขาย Gross, หักคืนเงิน, ค่าธรรมเนียม, รายรับสุทธิ
-                            </p>
-                          </div>
-                        </button>
-
-                        {/* Orders Report Excel */}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsExportOpen(false);
-                            handleExportCalcOrdersExcel();
-                          }}
-                          className="w-full text-left p-2.5 rounded-xl hover:bg-neutral-100/90 dark:hover:bg-neutral-800/80 transition-all cursor-pointer flex items-center gap-3 group/item"
-                        >
-                          <div className="h-9 w-9 rounded-xl bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 border border-blue-200/60 dark:border-blue-800/40 flex items-center justify-center shrink-0 group-hover/item:scale-105 transition-transform">
-                            <FileText className="h-4 w-4" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center justify-between">
-                              <span className="font-semibold text-xs text-neutral-900 dark:text-neutral-100 group-hover/item:text-blue-600 dark:group-hover/item:text-blue-400 transition-colors">
-                                รายการคำสั่งซื้อที่ใช้คำนวณ
-                              </span>
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-blue-100/70 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-900/50">
-                                Excel (.xlsx)
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate mt-0.5">
-                              รายละเอียดคำสั่งซื้อและรายรับ {baseTransactionsList.length} รายการ
-                            </p>
-                          </div>
-                        </button>
-
-                        {/* Print / PDF */}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsExportOpen(false);
-                            setTimeout(() => window.print(), 100);
-                          }}
-                          className="w-full text-left p-2.5 rounded-xl hover:bg-neutral-100/90 dark:hover:bg-neutral-800/80 transition-all cursor-pointer flex items-center gap-3 group/item"
-                        >
-                          <div className="h-9 w-9 rounded-xl bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 border border-rose-200/60 dark:border-rose-800/40 flex items-center justify-center shrink-0 group-hover/item:scale-105 transition-transform">
-                            <Printer className="h-4 w-4" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center justify-between">
-                              <span className="font-semibold text-xs text-neutral-900 dark:text-neutral-100 group-hover/item:text-rose-600 dark:group-hover/item:text-rose-400 transition-colors">
-                                พิมพ์รายงานเครื่องคำนวณ
-                              </span>
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-100/70 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900/50">
-                                PDF
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate mt-0.5">
-                              พิมพ์หรือบันทึกหน้าเครื่องคำนวณเป็น PDF
-                            </p>
-                          </div>
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    /* ---------------------------------------------------- */
-                    /* เมนูส่งออกเฉพาะหน้าแดชบอร์ดหลัก (Dashboard Exports)  */
-                    /* ---------------------------------------------------- */
-                    <>
-                      <div className="px-3 py-1.5 mb-1 flex items-center justify-between gap-2 border-b border-neutral-100 dark:border-neutral-800/80 pb-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
-                          ตัวเลือกการส่งออก (แดชบอร์ดหลัก)
-                        </span>
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-semibold bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 whitespace-nowrap shrink-0">
-                          3 รายการ
-                        </span>
-                      </div>
-
-                      <div className="space-y-1">
-                        {/* PDF Print option */}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsExportOpen(false);
-                            setTimeout(() => window.print(), 100);
-                          }}
-                          className="w-full text-left p-2.5 rounded-xl hover:bg-neutral-100/90 dark:hover:bg-neutral-800/80 transition-all cursor-pointer flex items-center gap-3 group/item"
-                        >
-                          <div className="h-9 w-9 rounded-xl bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 border border-rose-200/60 dark:border-rose-800/40 flex items-center justify-center shrink-0 group-hover/item:scale-105 transition-transform">
-                            <Printer className="h-4 w-4" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center justify-between">
-                              <span className="font-semibold text-xs text-neutral-900 dark:text-neutral-100 group-hover/item:text-rose-600 dark:group-hover/item:text-rose-400 transition-colors">
-                                พิมพ์รายงานสรุปแดชบอร์ด
-                              </span>
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-100/70 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900/50">
-                                PDF
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate mt-0.5">
-                              พิมพ์หรือบันทึกหน้าสรุปข้อมูลเป็น PDF
-                            </p>
-                          </div>
-                        </button>
-
-                        {/* Sales Channel CSV option */}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsExportOpen(false);
-                            handleExportChannelCSV();
-                          }}
-                          className="w-full text-left p-2.5 rounded-xl hover:bg-neutral-100/90 dark:hover:bg-neutral-800/80 transition-all cursor-pointer flex items-center gap-3 group/item"
-                        >
-                          <div className="h-9 w-9 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 border border-emerald-200/60 dark:border-emerald-800/40 flex items-center justify-center shrink-0 group-hover/item:scale-105 transition-transform">
-                            <FileSpreadsheet className="h-4 w-4" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center justify-between">
-                              <span className="font-semibold text-xs text-neutral-900 dark:text-neutral-100 group-hover/item:text-emerald-600 dark:group-hover/item:text-emerald-400 transition-colors">
-                                รายงานตามช่องทางขาย
-                              </span>
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-100/70 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/50">
-                                CSV
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate mt-0.5">
-                              แยกยอดขาย ออเดอร์ แบรนด์ และสินค้าขายดี
-                            </p>
-                          </div>
-                        </button>
-
-                        {/* Brand CSV option */}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsExportOpen(false);
-                            handleExportBrandCSV();
-                          }}
-                          className="w-full text-left p-2.5 rounded-xl hover:bg-neutral-100/90 dark:hover:bg-neutral-800/80 transition-all cursor-pointer flex items-center gap-3 group/item"
-                        >
-                          <div className="h-9 w-9 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 border border-indigo-200/60 dark:border-indigo-800/40 flex items-center justify-center shrink-0 group-hover/item:scale-105 transition-transform">
-                            <Tag className="h-4 w-4" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center justify-between">
-                              <span className="font-semibold text-xs text-neutral-900 dark:text-neutral-100 group-hover/item:text-indigo-600 dark:group-hover/item:text-indigo-400 transition-colors">
-                                รายงานตามแบรนด์สินค้า
-                              </span>
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-indigo-100/70 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900/50">
-                                CSV
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate mt-0.5">
-                              สรุปยอดขาย กำไร และจำนวนชิ้นรายแบรนด์
-                            </p>
-                          </div>
-                        </button>
-                      </div>
-                    </>
-                  )}
+              >
+                <div className="flex items-center gap-2.5">
+                  <div
+                    className={`p-1.5 rounded-lg transition-transform duration-300 group-hover:scale-110 ${
+                      isExportOpen
+                        ? "bg-white/20 text-white"
+                        : "bg-white/15 dark:bg-neutral-950/10 text-white dark:text-neutral-950"
+                    }`}
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                  </div>
+                  <span className="tracking-wide">ส่งออกรายงาน</span>
                 </div>
-              </>
-            )}
-          </div>
+                <ChevronDown
+                  className={`h-3.5 w-3.5 transition-transform duration-300 opacity-80 group-hover:opacity-100 ${
+                    isExportOpen ? "rotate-180" : ""
+                  }`}
+                />
+              </button>
+
+              {isExportOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setIsExportOpen(false)}
+                  />
+                  <div className="absolute right-0 top-full mt-2 w-80 sm:w-96 rounded-2xl border border-neutral-200/80 dark:border-neutral-800/80 bg-white/95 dark:bg-neutral-900/95 backdrop-blur-2xl shadow-2xl z-50 p-2 text-neutral-800 dark:text-neutral-100 animate-scale-in">
+                    <div className="px-3 py-1.5 mb-1 flex items-center justify-between gap-2 border-b border-neutral-100 dark:border-neutral-800/80 pb-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
+                        ตัวเลือกการส่งออก (แดชบอร์ดหลัก)
+                      </span>
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-semibold bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 whitespace-nowrap shrink-0">
+                        3 รายการ
+                      </span>
+                    </div>
+
+                    <div className="space-y-1">
+                      {/* PDF Print option */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsExportOpen(false);
+                          setTimeout(() => window.print(), 100);
+                        }}
+                        className="w-full text-left p-2.5 rounded-xl hover:bg-neutral-100/90 dark:hover:bg-neutral-800/80 transition-all cursor-pointer flex items-center gap-3 group/item"
+                      >
+                        <div className="h-9 w-9 rounded-xl bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 border border-rose-200/60 dark:border-rose-800/40 flex items-center justify-center shrink-0 group-hover/item:scale-105 transition-transform">
+                          <Printer className="h-4 w-4" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-xs text-neutral-900 dark:text-neutral-100 group-hover/item:text-rose-600 dark:group-hover/item:text-rose-400 transition-colors">
+                              พิมพ์รายงานสรุปแดชบอร์ด
+                            </span>
+                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-rose-100/70 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900/50">
+                              PDF
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate mt-0.5">
+                            พิมพ์หรือบันทึกหน้าสรุปข้อมูลเป็น PDF
+                          </p>
+                        </div>
+                      </button>
+
+                      {/* Sales Channel CSV option */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsExportOpen(false);
+                          handleExportChannelCSV();
+                        }}
+                        className="w-full text-left p-2.5 rounded-xl hover:bg-neutral-100/90 dark:hover:bg-neutral-800/80 transition-all cursor-pointer flex items-center gap-3 group/item"
+                      >
+                        <div className="h-9 w-9 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 border border-emerald-200/60 dark:border-emerald-800/40 flex items-center justify-center shrink-0 group-hover/item:scale-105 transition-transform">
+                          <FileSpreadsheet className="h-4 w-4" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-xs text-neutral-900 dark:text-neutral-100 group-hover/item:text-emerald-600 dark:group-hover/item:text-emerald-400 transition-colors">
+                              รายงานตามช่องทางขาย
+                            </span>
+                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-100/70 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/50">
+                              CSV
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate mt-0.5">
+                            แยกยอดขาย ออเดอร์ แบรนด์ และสินค้าขายดี
+                          </p>
+                        </div>
+                      </button>
+
+                      {/* Brand CSV option */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsExportOpen(false);
+                          handleExportBrandCSV();
+                        }}
+                        className="w-full text-left p-2.5 rounded-xl hover:bg-neutral-100/90 dark:hover:bg-neutral-800/80 transition-all cursor-pointer flex items-center gap-3 group/item"
+                      >
+                        <div className="h-9 w-9 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 border border-indigo-200/60 dark:border-indigo-800/40 flex items-center justify-center shrink-0 group-hover/item:scale-105 transition-transform">
+                          <Tag className="h-4 w-4" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-xs text-neutral-900 dark:text-neutral-100 group-hover/item:text-indigo-600 dark:group-hover/item:text-indigo-400 transition-colors">
+                              รายงานตามแบรนด์สินค้า
+                            </span>
+                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-indigo-100/70 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900/50">
+                              CSV
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate mt-0.5">
+                            สรุปยอดขาย กำไร และจำนวนชิ้นรายแบรนด์
+                          </p>
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
